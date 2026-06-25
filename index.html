@@ -136,13 +136,30 @@
     display: flex; align-items: center; justify-content: center;
     touch-action: none;
   }
-  #editStage { position: relative; }
   #editImg { display: block; max-width: 100%; max-height: 100%; }
-  #editSvg { position: absolute; inset: 0; width: 100%; height: 100%; overflow: visible; }
+  #editSvg { position: absolute; left: 0; top: 0; overflow: visible; pointer-events: none; }
   .corner {
     fill: var(--accent); stroke: #fff; stroke-width: 2;
   }
+  .hit { fill: transparent; }
   .edge { stroke: var(--accent); stroke-width: 2.5; fill: rgba(247,130,27,.12); }
+
+  /* loupe (zoom au doigt) */
+  #loupe {
+    position: absolute; top: 14px; left: 14px;
+    width: 92px; height: 92px; border-radius: 50%;
+    border: 3px solid #fff; box-shadow: 0 2px 12px rgba(0,0,0,.55);
+    display: none; z-index: 6; background: #000; pointer-events: none;
+  }
+  #loupe.show { display: block; }
+
+  /* curseur de noirceur */
+  .darkness {
+    flex-shrink: 0; display: none; align-items: center; gap: 12px;
+    padding: 8px 18px 2px; background: var(--editor-bg); color: #9a9a9a; font-size: 11px;
+  }
+  .darkness.show { display: flex; }
+  .darkness input { flex: 1; accent-color: var(--accent); height: 26px; }
 
   /* filtres */
   .filters {
@@ -287,15 +304,19 @@
   </div>
 
   <div class="canvas-wrap" id="canvasWrap">
-    <div id="editStage">
-      <img id="editImg" alt="">
-      <svg id="editSvg"></svg>
-    </div>
+    <img id="editImg" alt="">
+    <svg id="editSvg"></svg>
+    <canvas id="loupe" width="180" height="180"></canvas>
+  </div>
+
+  <div class="darkness" id="darknessRow">
+    <span>Clair</span>
+    <input type="range" id="darknessSlider" min="0" max="100" value="50" aria-label="Noirceur">
+    <span>Foncé</span>
   </div>
 
   <div class="filters" id="filters">
-    <button class="chip active" data-filter="auto"><div class="swatch">N&amp;B</div>Auto</button>
-    <button class="chip" data-filter="bw"><div class="swatch">N&amp;B</div>Renforcé</button>
+    <button class="chip active" data-filter="bw"><div class="swatch">N&amp;B</div>Noir &amp; blanc</button>
     <button class="chip" data-filter="gray"><div class="swatch">Gris</div>Gris</button>
     <button class="chip" data-filter="color"><div class="swatch">Coul.</div>Couleur</button>
   </div>
@@ -415,7 +436,7 @@ $('cameraInput').addEventListener('change', async (e) => {
     const baseCanvas = bitmapToCanvas(bmp, 2000);
     showLoader('Détection des bords…');
     const corners = detectCorners(baseCanvas);
-    openEditor({ base: baseCanvas, corners, rotation: 0, filter: 'auto', pageIndex: null });
+    openEditor({ base: baseCanvas, corners, rotation: 0, filter: 'bw', darkness: 50, pageIndex: null });
   } catch (err) {
     console.error(err);
     toast('Impossible de lire cette image.');
@@ -523,7 +544,9 @@ let dragIndex = -1;
 
 function openEditor(state) {
   editState = state;
+  if (typeof editState.darkness !== 'number') editState.darkness = 50;
   show('editor');
+  updateFilterUI();
   const img = $('editImg');
   // rendu de base (rotation appliquée visuellement)
   const disp = rotatedCanvas(state.base, state.rotation);
@@ -531,10 +554,18 @@ function openEditor(state) {
   img.onload = () => layoutEditor();
 }
 
+/* reflète editState.filter dans les chips + affiche le curseur si N&B */
+function updateFilterUI() {
+  document.querySelectorAll('.chip').forEach(c =>
+    c.classList.toggle('active', c.dataset.filter === editState.filter));
+  $('darknessRow').classList.toggle('show', editState.filter === 'bw');
+  $('darknessSlider').value = editState.darkness;
+}
+
 function openEditorForPage(i) {
   // ré-édition : on repart de la source d'origine de la page si dispo
   const p = pages[i];
-  openEditor({ base: p.base, corners: p.corners, rotation: p.rotation, filter: p.filter, pageIndex: i });
+  openEditor({ base: p.base, corners: p.corners, rotation: p.rotation, filter: p.filter, darkness: p.darkness, pageIndex: i });
 }
 
 function rotatedCanvas(canvas, deg) {
@@ -564,20 +595,26 @@ function rotateCorners(corners, baseW, baseH, deg) {
 
 function layoutEditor() {
   const img = $('editImg');
-  const stage = $('editStage');
   const svg = $('editSvg');
-  // taille affichée réelle
-  const dispW = img.clientWidth, dispH = img.clientHeight;
-  stage.style.width = dispW + 'px';
-  stage.style.height = dispH + 'px';
+  const wrap = $('canvasWrap');
+  // position/taille RÉELLES de l'image à l'écran (repère fiable, anti-décalage)
+  const wr = wrap.getBoundingClientRect();
+  const ir = img.getBoundingClientRect();
+  const dispW = ir.width, dispH = ir.height;
+  // le SVG est posé EXACTEMENT sur l'image
+  svg.style.left = (ir.left - wr.left) + 'px';
+  svg.style.top = (ir.top - wr.top) + 'px';
+  svg.style.width = dispW + 'px';
+  svg.style.height = dispH + 'px';
   svg.setAttribute('viewBox', `0 0 ${dispW} ${dispH}`);
 
-  // facteur image source (après rotation) -> affichage
+  // canvas source affiché (après rotation) + facteur d'échelle
   const rc = rotatedCanvas(editState.base, editState.rotation);
   const sx = dispW / rc.width, sy = dispH / rc.height;
   const cornersRot = rotateCorners(editState.corners, editState.base.width, editState.base.height, editState.rotation);
   editState._disp = cornersRot.map(p => ({ x: p.x * sx, y: p.y * sy }));
-  editState._scale = { sx, sy, srcW: rc.width, srcH: rc.height };
+  editState._scale = { sx, sy, srcW: rc.width, srcH: rc.height, dispW, dispH };
+  editState._rc = rc;
   drawEditor();
 }
 
@@ -591,24 +628,53 @@ function drawEditor() {
   poly.setAttribute('points', c.map(p => `${p.x},${p.y}`).join(' '));
   poly.setAttribute('class', 'edge');
   svg.appendChild(poly);
-  // poignées
+  // poignées : grosse zone tactile invisible + pastille visible
   c.forEach((p, i) => {
+    const hit = document.createElementNS(ns, 'circle');
+    hit.setAttribute('cx', p.x); hit.setAttribute('cy', p.y);
+    hit.setAttribute('r', 30); hit.setAttribute('class', 'hit');
+    svg.appendChild(hit);
     const circ = document.createElementNS(ns, 'circle');
     circ.setAttribute('cx', p.x); circ.setAttribute('cy', p.y);
-    circ.setAttribute('r', 13); circ.setAttribute('class', 'corner');
-    circ.dataset.i = i;
+    circ.setAttribute('r', 11); circ.setAttribute('class', 'corner');
     svg.appendChild(circ);
   });
 }
 
-/* drag des poignées (tactile + souris) */
+/* loupe : zoom autour de la poignée en cours, pour viser précis */
+function updateLoupe(idx) {
+  const lp = $('loupe');
+  if (idx < 0) { lp.classList.remove('show'); return; }
+  const p = editState._disp[idx];
+  const { sx, sy } = editState._scale;
+  const rc = editState._rc;
+  const cx = p.x / sx, cy = p.y / sy;      // centre dans le canvas source
+  const zoom = 2.6, R = lp.width;
+  const srcR = (R / zoom) / 2;
+  const ctx = lp.getContext('2d');
+  ctx.fillStyle = '#000'; ctx.fillRect(0, 0, R, R);
+  ctx.save();
+  ctx.beginPath(); ctx.arc(R / 2, R / 2, R / 2, 0, Math.PI * 2); ctx.clip();
+  ctx.drawImage(rc, cx - srcR, cy - srcR, srcR * 2, srcR * 2, 0, 0, R, R);
+  // réticule
+  ctx.strokeStyle = 'rgba(247,130,27,.95)'; ctx.lineWidth = 2;
+  ctx.beginPath();
+  ctx.moveTo(R / 2 - 14, R / 2); ctx.lineTo(R / 2 + 14, R / 2);
+  ctx.moveTo(R / 2, R / 2 - 14); ctx.lineTo(R / 2, R / 2 + 14);
+  ctx.stroke();
+  ctx.restore();
+  lp.classList.add('show');
+}
+
+/* drag des poignées (tactile + souris) — repère ancré sur l'image */
+let dragOffset = { x: 0, y: 0 };
 function pointerPos(e) {
   const r = $('editSvg').getBoundingClientRect();
   const t = e.touches ? e.touches[0] : e;
   return { x: t.clientX - r.left, y: t.clientY - r.top };
 }
 function nearestCorner(pos) {
-  let idx = -1, min = 40 * 40;
+  let idx = -1, min = 44 * 44;
   editState._disp.forEach((p, i) => {
     const d = (p.x - pos.x) ** 2 + (p.y - pos.y) ** 2;
     if (d < min) { min = d; idx = i; }
@@ -619,18 +685,31 @@ function startDrag(e) {
   if (!editState) return;
   const pos = pointerPos(e);
   dragIndex = nearestCorner(pos);
-  if (dragIndex >= 0) e.preventDefault();
+  if (dragIndex >= 0) {
+    e.preventDefault();
+    const c = editState._disp[dragIndex];
+    dragOffset = { x: c.x - pos.x, y: c.y - pos.y }; // prise sans saut
+    updateLoupe(dragIndex);
+  }
 }
 function moveDrag(e) {
   if (dragIndex < 0) return;
   e.preventDefault();
   const pos = pointerPos(e);
+  const { dispW, dispH } = editState._scale;
   const d = editState._disp;
-  d[dragIndex].x = Math.max(0, Math.min(editState._scale.srcW * editState._scale.sx, pos.x));
-  d[dragIndex].y = Math.max(0, Math.min(editState._scale.srcH * editState._scale.sy, pos.y));
+  d[dragIndex].x = Math.max(0, Math.min(dispW, pos.x + dragOffset.x));
+  d[dragIndex].y = Math.max(0, Math.min(dispH, pos.y + dragOffset.y));
   drawEditor();
+  updateLoupe(dragIndex);
 }
-function endDrag() { dragIndex = -1; }
+function endDrag() {
+  if (dragIndex >= 0) {
+    editState.corners = dispToSource(editState); // on fige les coins (survit aux rotations)
+    updateLoupe(-1);
+  }
+  dragIndex = -1;
+}
 
 const wrap = $('canvasWrap');
 wrap.addEventListener('touchstart', startDrag, { passive: false });
@@ -652,6 +731,7 @@ $('resetCorners').addEventListener('click', () => {
     { x: rc.width * (1 - m) * editState._scale.sx, y: rc.height * (1 - m) * editState._scale.sy },
     { x: rc.width * m * editState._scale.sx, y: rc.height * (1 - m) * editState._scale.sy },
   ];
+  editState.corners = dispToSource(editState);
   drawEditor();
 });
 function reopenEditorImg() {
@@ -664,10 +744,14 @@ function reopenEditorImg() {
 /* filtres */
 document.querySelectorAll('.chip').forEach(ch => {
   ch.addEventListener('click', () => {
-    document.querySelectorAll('.chip').forEach(c => c.classList.remove('active'));
-    ch.classList.add('active');
     editState.filter = ch.dataset.filter;
+    updateFilterUI();
   });
+});
+
+/* curseur de noirceur (N&B) */
+$('darknessSlider').addEventListener('input', (e) => {
+  if (editState) editState.darkness = +e.target.value;
 });
 
 /* annuler / supprimer */
@@ -691,6 +775,7 @@ $('editDone').addEventListener('click', async () => {
       corners: dispToSource(editState),
       rotation: editState.rotation,
       filter: editState.filter,
+      darkness: editState.darkness,
       canvas: result,
       thumb: result.toDataURL('image/jpeg', 0.6),
     };
@@ -737,7 +822,7 @@ function renderPage(st) {
   if (cvReady) warped = warpCv(rc, corners, outW, outH);
   else warped = warpFallback(rc, corners, outW, outH);
 
-  return applyFilter(warped, st.filter);
+  return applyFilter(warped, st.filter, st.darkness);
 }
 function dist(a, b) { return Math.hypot(a.x - b.x, a.y - b.y); }
 
@@ -768,21 +853,22 @@ function warpFallback(canvas, c, outW, outH) {
 /* ============================================================
    Filtres
    ============================================================ */
-function applyFilter(canvas, filter) {
+function applyFilter(canvas, filter, darkness) {
   if (filter === 'color') return canvas;
-  if (cvReady && (filter === 'auto' || filter === 'bw')) {
-    return bwCv(canvas, filter === 'bw');
-  }
-  // gris ou fallback
-  return grayJs(canvas, filter !== 'gray'); // si pas gris -> seuillage Otsu
+  if (filter === 'gray') return grayJs(canvas, false);
+  // N&B
+  if (cvReady) return bwCv(canvas, darkness);
+  return grayJs(canvas, true); // fallback : seuillage Otsu
 }
 
-function bwCv(canvas, strong) {
+function bwCv(canvas, darkness) {
   const src = cv.imread(canvas);
   const gray = new cv.Mat();
   cv.cvtColor(src, gray, cv.COLOR_RGBA2GRAY);
   const dst = new cv.Mat();
-  const block = 25, C = strong ? 15 : 12;
+  // darkness 0 (clair) -> 100 (foncé) ; C élevé = plus clair
+  const d = (typeof darkness === 'number') ? darkness : 50;
+  const block = 25, C = 22 - (d / 100) * 26;
   cv.adaptiveThreshold(gray, dst, 255, cv.ADAPTIVE_THRESH_GAUSSIAN_C, cv.THRESH_BINARY, block, C);
   const out = document.createElement('canvas');
   out.width = canvas.width; out.height = canvas.height;
