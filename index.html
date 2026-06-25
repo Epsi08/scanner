@@ -1220,25 +1220,34 @@ function bwCv(canvas, darkness) {
   const gray = new cv.Mat();
   cv.cvtColor(src, gray, cv.COLOR_RGBA2GRAY);
 
-  // 1) estimation du fond (eclairage) : downscale -> gros flou -> upscale
-  const f = 0.125;
-  const sw = Math.max(1, Math.round(gray.cols * f));
-  const sh = Math.max(1, Math.round(gray.rows * f));
-  const small = new cv.Mat();
-  cv.resize(gray, small, new cv.Size(sw, sh), 0, 0, cv.INTER_AREA);
-  let k = Math.round(Math.max(sw, sh) / 6); if (k % 2 === 0) k++; if (k < 3) k = 3;
-  cv.GaussianBlur(small, small, new cv.Size(k, k), 0);
+  // 1) estimation du fond papier : fermeture morpho (le max local remplit le
+  //    texte sombre par le papier alentour) a resolution elevee pour conserver
+  //    le vrai blanc entre les lignes, puis flou pour lisser.
+  const maxBg = 1400;
+  const scale = Math.min(1, maxBg / Math.max(gray.cols, gray.rows));
+  const sw = Math.max(1, Math.round(gray.cols * scale));
+  const sh = Math.max(1, Math.round(gray.rows * scale));
+  const work = new cv.Mat();
+  if (scale < 1) cv.resize(gray, work, new cv.Size(sw, sh), 0, 0, cv.INTER_AREA);
+  else gray.copyTo(work);
+  let ks = Math.round(Math.max(sw, sh) / 40); if (ks % 2 === 0) ks++; if (ks < 15) ks = 15;
+  const kernel = cv.getStructuringElement(cv.MORPH_ELLIPSE, new cv.Size(ks, ks));
+  cv.morphologyEx(work, work, cv.MORPH_CLOSE, kernel);
+  cv.GaussianBlur(work, work, new cv.Size(ks, ks), 0);
   const bg = new cv.Mat();
-  cv.resize(small, bg, new cv.Size(gray.cols, gray.rows), 0, 0, cv.INTER_LINEAR);
+  if (scale < 1) cv.resize(work, bg, new cv.Size(gray.cols, gray.rows), 0, 0, cv.INTER_LINEAR);
+  else work.copyTo(bg);
+  work.delete();
 
   // 2) division : le fond devient blanc, l'eclairage inegal disparait
   const norm = new cv.Mat();
   cv.divide(gray, bg, norm, 255);
 
-  // 3) niveaux/contraste selon darkness (on reste en gris -> bords lisses)
+  // 3) niveaux : point noir remonte pour que le texte gris devienne franc,
+  //    point blanc haut pour garder le papier blanc. darkness regle l'intensite.
   const d = (typeof darkness === 'number') ? darkness : 50;
-  const Wp = 238 - (d / 100) * 70;   // point blanc : 238 (clair) -> 168 (fonce)
-  const Bp = 55 - (d / 100) * 35;    // point noir  : 55  (clair) -> 20  (fonce)
+  const Bp = 90 + (d / 100) * 90;    // point noir : 90 (clair) -> 180 (tres fonce)
+  const Wp = 245 - (d / 100) * 15;   // point blanc : 245 -> 230 (papier blanc)
   const lut = new cv.Mat(1, 256, cv.CV_8U);
   const ld = lut.data;
   for (let i = 0; i < 256; i++) {
@@ -1252,7 +1261,7 @@ function bwCv(canvas, darkness) {
   const out = document.createElement('canvas');
   out.width = canvas.width; out.height = canvas.height;
   cv.imshow(out, out8);
-  src.delete(); gray.delete(); small.delete(); bg.delete(); norm.delete(); lut.delete(); out8.delete();
+  src.delete(); gray.delete(); bg.delete(); norm.delete(); lut.delete(); out8.delete(); kernel.delete();
   return out;
 }
 
