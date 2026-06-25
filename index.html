@@ -153,6 +153,24 @@
   }
   #loupe.show { display: block; }
 
+  /* barre interrupteur aperçu */
+  .preview-bar {
+    flex-shrink: 0; display: flex; align-items: center; justify-content: space-between;
+    padding: 10px 18px 4px; background: var(--editor-bg); color: #c8c8c8; font-size: 13px;
+  }
+  .switch { position: relative; display: inline-block; width: 46px; height: 28px; }
+  .switch input { opacity: 0; width: 0; height: 0; }
+  .switch .track {
+    position: absolute; inset: 0; background: #4a4a4c; border-radius: 28px;
+    transition: background .2s;
+  }
+  .switch .track::before {
+    content: ''; position: absolute; left: 3px; top: 3px; width: 22px; height: 22px;
+    background: #fff; border-radius: 50%; transition: transform .2s;
+  }
+  .switch input:checked + .track { background: var(--accent); }
+  .switch input:checked + .track::before { transform: translateX(18px); }
+
   /* curseur de noirceur */
   .darkness {
     flex-shrink: 0; display: none; align-items: center; gap: 12px;
@@ -307,6 +325,14 @@
     <img id="editImg" alt="">
     <svg id="editSvg"></svg>
     <canvas id="loupe" width="180" height="180"></canvas>
+  </div>
+
+  <div class="preview-bar">
+    <span>Aperçu du rendu en direct</span>
+    <label class="switch">
+      <input type="checkbox" id="livePreviewToggle">
+      <span class="track"></span>
+    </label>
   </div>
 
   <div class="darkness" id="darknessRow">
@@ -576,16 +602,42 @@ function orderCorners(pts) {
 const DISPLAY_MAX = 1; // ratio géré par CSS, on stocke l'échelle
 let dragIndex = -1;
 
+let livePreview = localStorage.getItem('scanLivePreview') === '1';
+
 function openEditor(state) {
   editState = state;
   if (typeof editState.darkness !== 'number') editState.darkness = 50;
   show('editor');
+  $('livePreviewToggle').checked = livePreview;
   updateFilterUI();
+  renderEditorImage(true);
+}
+
+/* image affichée dans l'éditeur : brute, ou filtrée en direct si aperçu actif */
+function buildDisplayCanvas() {
+  const rc = rotatedCanvas(editState.base, editState.rotation);
+  if (!livePreview) return rc;
+  // copie réduite pour la perf, puis filtre appliqué
+  const maxSide = 1100;
+  const scale = Math.min(1, maxSide / Math.max(rc.width, rc.height));
+  const pc = document.createElement('canvas');
+  pc.width = Math.round(rc.width * scale);
+  pc.height = Math.round(rc.height * scale);
+  pc.getContext('2d').drawImage(rc, 0, 0, pc.width, pc.height);
+  return applyFilter(pc, editState.filter, editState.darkness);
+}
+
+let _previewPending = false;
+function renderEditorImage(relayout) {
   const img = $('editImg');
-  // rendu de base (rotation appliquée visuellement)
-  const disp = rotatedCanvas(state.base, state.rotation);
+  const disp = buildDisplayCanvas();
+  img.onload = relayout ? (() => layoutEditor()) : null;
   img.src = disp.toDataURL('image/jpeg', 0.85);
-  img.onload = () => layoutEditor();
+}
+function schedulePreview() {
+  if (!livePreview || _previewPending) return;
+  _previewPending = true;
+  requestAnimationFrame(() => { _previewPending = false; if (editState) renderEditorImage(false); });
 }
 
 /* reflète editState.filter dans les chips + affiche le curseur si N&B */
@@ -769,10 +821,7 @@ $('resetCorners').addEventListener('click', () => {
   drawEditor();
 });
 function reopenEditorImg() {
-  const img = $('editImg');
-  const disp = rotatedCanvas(editState.base, editState.rotation);
-  img.src = disp.toDataURL('image/jpeg', 0.85);
-  img.onload = () => layoutEditor();
+  renderEditorImage(true);
 }
 
 /* filtres */
@@ -780,12 +829,22 @@ document.querySelectorAll('.chip').forEach(ch => {
   ch.addEventListener('click', () => {
     editState.filter = ch.dataset.filter;
     updateFilterUI();
+    if (livePreview) renderEditorImage(false);
   });
 });
 
 /* curseur de noirceur (N&B) */
 $('darknessSlider').addEventListener('input', (e) => {
-  if (editState) editState.darkness = +e.target.value;
+  if (!editState) return;
+  editState.darkness = +e.target.value;
+  schedulePreview();
+});
+
+/* interrupteur aperçu live (mémorisé) */
+$('livePreviewToggle').addEventListener('change', (e) => {
+  livePreview = e.target.checked;
+  localStorage.setItem('scanLivePreview', livePreview ? '1' : '0');
+  if (editState) renderEditorImage(false);
 });
 
 /* annuler / supprimer */
@@ -900,9 +959,10 @@ function bwCv(canvas, darkness) {
   const gray = new cv.Mat();
   cv.cvtColor(src, gray, cv.COLOR_RGBA2GRAY);
   const dst = new cv.Mat();
-  // darkness 0 (clair) -> 100 (foncé) ; C élevé = plus clair
+  // darkness 0 (clair) -> 100 (foncé) ; C élevé = plus clair.
+  // plancher à C=2 pour éviter que les aplats blancs ne s'inversent en noir.
   const d = (typeof darkness === 'number') ? darkness : 50;
-  const block = 25, C = 22 - (d / 100) * 26;
+  const block = 25, C = 22 - (d / 100) * 20;
   cv.adaptiveThreshold(gray, dst, 255, cv.ADAPTIVE_THRESH_GAUSSIAN_C, cv.THRESH_BINARY, block, C);
   const out = document.createElement('canvas');
   out.width = canvas.width; out.height = canvas.height;
