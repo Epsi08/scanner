@@ -209,6 +209,42 @@
   .edit-tools button svg { width: 24px; height: 24px; }
   .edit-tools button.danger { color: #FF453A; }
 
+  /* ---------- CAMÉRA LIVE ---------- */
+  #camera { background: #000; }
+  #camVideo {
+    position: absolute; inset: 0; width: 100%; height: 100%;
+    object-fit: contain; background: #000;
+  }
+  #camOverlay { position: absolute; inset: 0; width: 100%; height: 100%; pointer-events: none; }
+  .cam-top {
+    position: absolute; top: 0; left: 0; right: 0;
+    padding-top: calc(var(--safe-top) + 10px);
+    display: flex; align-items: center; gap: 12px;
+    padding-left: 14px; padding-right: 14px; padding-bottom: 10px;
+    background: linear-gradient(rgba(0,0,0,.55), rgba(0,0,0,0));
+    z-index: 3;
+  }
+  .cam-top .iconbtn { color: #fff; background: rgba(255,255,255,.15); }
+  .cam-hint { color: #fff; font-size: 14px; font-weight: 500; }
+  .cam-hint.locked { color: #34C759; }
+  .cam-bottom {
+    position: absolute; left: 0; right: 0; bottom: 0;
+    padding-bottom: calc(var(--safe-bottom) + 28px); padding-top: 20px;
+    display: flex; align-items: center; justify-content: center;
+    background: linear-gradient(rgba(0,0,0,0), rgba(0,0,0,.55));
+    z-index: 3;
+  }
+  .shutter {
+    width: 74px; height: 74px; border-radius: 50%;
+    border: 4px solid #fff; background: transparent;
+    display: flex; align-items: center; justify-content: center;
+  }
+  .shutter span {
+    width: 58px; height: 58px; border-radius: 50%; background: #fff;
+    transition: transform .1s;
+  }
+  .shutter:active span { transform: scale(.88); }
+
   /* ---------- Feuille d'export ---------- */
   .sheet-backdrop {
     position: fixed; inset: 0; background: rgba(0,0,0,.4);
@@ -367,7 +403,22 @@
   </div>
 </section>
 
-<!-- inputs : appareil photo (capture) + photothèque (sans capture) -->
+<!-- =================== CAMÉRA LIVE =================== -->
+<section id="camera" class="screen hidden">
+  <video id="camVideo" playsinline muted autoplay></video>
+  <canvas id="camOverlay"></canvas>
+  <div class="cam-top">
+    <button class="iconbtn" id="camCancel" aria-label="Fermer">
+      <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M18 6 6 18M6 6l12 12"/></svg>
+    </button>
+    <span id="camHint" class="cam-hint">Recherche du document…</span>
+  </div>
+  <div class="cam-bottom">
+    <button id="camShoot" class="shutter" aria-label="Capturer"><span></span></button>
+  </div>
+</section>
+
+<!-- inputs : repli prise de photo (capture) + photothèque (sans capture) -->
 <input type="file" id="cameraInput" accept="image/*" capture="environment" class="hidden">
 <input type="file" id="libraryInput" accept="image/*" class="hidden">
 
@@ -414,6 +465,7 @@ function toast(msg) {
 function show(screen) {
   $('home').classList.toggle('hidden', screen !== 'home');
   $('editor').classList.toggle('hidden', screen !== 'editor');
+  $('camera').classList.toggle('hidden', screen !== 'camera');
 }
 
 /* ============================================================
@@ -474,7 +526,7 @@ function openSourceSheet() {
   bd.addEventListener('click', () => bd.remove());
   document.body.appendChild(bd);
   $('srcCancel').addEventListener('click', () => bd.remove());
-  $('srcCamera').addEventListener('click', () => { bd.remove(); triggerInput('cameraInput'); });
+  $('srcCamera').addEventListener('click', () => { bd.remove(); startLiveCamera(); });
   $('srcLibrary').addEventListener('click', () => { bd.remove(); triggerInput('libraryInput'); });
 }
 
@@ -505,6 +557,126 @@ async function processImageFile(file) {
 $('cameraInput').addEventListener('change', (e) => processImageFile(e.target.files && e.target.files[0]));
 $('libraryInput').addEventListener('change', (e) => processImageFile(e.target.files && e.target.files[0]));
 
+/* ============================================================
+   CAMÉRA LIVE — détection du document en temps réel + capture
+   ============================================================ */
+let camStream = null, camRAF = null;
+let camLastQuad = null;        // dernier quad détecté (espace canvas de détection)
+let camDetScale = 1;          // facteur canvas détection -> pixels vidéo
+let camLastDetTime = 0;
+const camDet = document.createElement('canvas');
+
+async function startLiveCamera() {
+  addingPage = pages.length > 0;
+  if (!navigator.mediaDevices || !navigator.mediaDevices.getUserMedia) {
+    return triggerInput('cameraInput'); // repli prise de photo
+  }
+  try {
+    camStream = await navigator.mediaDevices.getUserMedia({
+      video: { facingMode: { ideal: 'environment' }, width: { ideal: 1920 }, height: { ideal: 1080 } },
+      audio: false,
+    });
+  } catch (err) {
+    console.warn('Caméra live indisponible, repli photo', err);
+    toast('Caméra live indisponible — mode photo.');
+    return triggerInput('cameraInput');
+  }
+  const v = $('camVideo');
+  v.srcObject = camStream;
+  camLastQuad = null;
+  show('camera');
+  $('camHint').textContent = 'Recherche du document…';
+  $('camHint').classList.remove('locked');
+  try { await v.play(); } catch (_) {}
+  const begin = () => { resizeOverlay(); camLoop(); };
+  if (v.videoWidth) begin(); else v.onloadedmetadata = begin;
+}
+
+function resizeOverlay() {
+  const ov = $('camOverlay');
+  ov.width = ov.clientWidth; ov.height = ov.clientHeight;
+}
+
+/* rect d'affichage de la vidéo (object-fit: contain) */
+function videoDisplayRect() {
+  const v = $('camVideo'), ov = $('camOverlay');
+  const cw = ov.width, ch = ov.height, vw = v.videoWidth, vh = v.videoHeight;
+  if (!vw || !vh) return { offX: 0, offY: 0, scaleFromVideo: 1 };
+  const vAR = vw / vh, cAR = cw / ch;
+  let dispW, dispH;
+  if (vAR > cAR) { dispW = cw; dispH = cw / vAR; } else { dispH = ch; dispW = ch * vAR; }
+  return { offX: (cw - dispW) / 2, offY: (ch - dispH) / 2, scaleFromVideo: dispW / vw };
+}
+
+function camLoop() {
+  if (!camStream) return;
+  const v = $('camVideo');
+  const now = performance.now();
+  if (cvReady && v.videoWidth && now - camLastDetTime > 140) {
+    camLastDetTime = now;
+    const detW = 360, detH = Math.round(detW * v.videoHeight / v.videoWidth);
+    camDet.width = detW; camDet.height = detH;
+    camDet.getContext('2d').drawImage(v, 0, 0, detW, detH);
+    camLastQuad = detectQuad(camDet);   // peut être null
+    camDetScale = v.videoWidth / detW;
+  }
+  drawCamOverlay();
+  camRAF = requestAnimationFrame(camLoop);
+}
+
+function drawCamOverlay() {
+  const ov = $('camOverlay'), ctx = ov.getContext('2d');
+  ctx.clearRect(0, 0, ov.width, ov.height);
+  const hint = $('camHint');
+  if (!camLastQuad) {
+    hint.textContent = cvReady ? 'Recherche du document…' : 'Chargement…';
+    hint.classList.remove('locked');
+    return;
+  }
+  hint.textContent = 'Document détecté ✓';
+  hint.classList.add('locked');
+  const r = videoDisplayRect();
+  const pts = camLastQuad.map(p => ({
+    x: r.offX + p.x * camDetScale * r.scaleFromVideo,
+    y: r.offY + p.y * camDetScale * r.scaleFromVideo,
+  }));
+  ctx.beginPath();
+  pts.forEach((p, i) => i ? ctx.lineTo(p.x, p.y) : ctx.moveTo(p.x, p.y));
+  ctx.closePath();
+  ctx.fillStyle = 'rgba(247,130,27,.18)';
+  ctx.strokeStyle = '#F7821B'; ctx.lineWidth = 3;
+  ctx.fill(); ctx.stroke();
+  pts.forEach(p => {
+    ctx.beginPath(); ctx.arc(p.x, p.y, 7, 0, Math.PI * 2);
+    ctx.fillStyle = '#F7821B'; ctx.fill();
+    ctx.strokeStyle = '#fff'; ctx.lineWidth = 2; ctx.stroke();
+  });
+}
+
+function stopCamera() {
+  if (camRAF) { cancelAnimationFrame(camRAF); camRAF = null; }
+  if (camStream) { camStream.getTracks().forEach(t => t.stop()); camStream = null; }
+  $('camVideo').srcObject = null;
+}
+
+$('camCancel').addEventListener('click', () => { stopCamera(); show('home'); refreshHome(); });
+
+$('camShoot').addEventListener('click', () => {
+  const v = $('camVideo');
+  if (!v.videoWidth) return;
+  const full = document.createElement('canvas');
+  full.width = v.videoWidth; full.height = v.videoHeight;
+  full.getContext('2d').drawImage(v, 0, 0);
+  const quadVideo = camLastQuad ? camLastQuad.map(p => ({ x: p.x * camDetScale, y: p.y * camDetScale })) : null;
+  stopCamera();
+  const base = bitmapToCanvas(full, 2000);
+  const s = base.width / full.width;
+  const corners = quadVideo ? quadVideo.map(p => ({ x: p.x * s, y: p.y * s })) : fallbackRect(base.width, base.height);
+  openEditor({ base, corners, rotation: 0, filter: 'bw', darkness: 50, pageIndex: null });
+});
+
+window.addEventListener('resize', () => { if (camStream) resizeOverlay(); });
+
 /* Charge un fichier image -> ImageBitmap avec orientation EXIF corrigée */
 async function loadBitmap(file) {
   try {
@@ -533,17 +705,20 @@ function bitmapToCanvas(bmp, maxSide) {
 /* ============================================================
    Détection des coins (OpenCV) — fallback marge par défaut
    ============================================================ */
-function detectCorners(canvas) {
-  const W = canvas.width, H = canvas.height;
-  const margin = 0.04;
-  const fallback = [
-    { x: W * margin,       y: H * margin },
-    { x: W * (1 - margin), y: H * margin },
-    { x: W * (1 - margin), y: H * (1 - margin) },
-    { x: W * margin,       y: H * (1 - margin) },
+function fallbackRect(W, H) {
+  const m = 0.04;
+  return [
+    { x: W * m,       y: H * m },
+    { x: W * (1 - m), y: H * m },
+    { x: W * (1 - m), y: H * (1 - m) },
+    { x: W * m,       y: H * (1 - m) },
   ];
-  if (!cvReady) return fallback;
+}
 
+/* renvoie le quadrilatère détecté (ordonné TL,TR,BR,BL) ou null si rien de fiable */
+function detectQuad(canvas) {
+  if (!cvReady) return null;
+  const W = canvas.width, H = canvas.height;
   let src, gray, blur, edges, contours, hierarchy;
   try {
     src = cv.imread(canvas);
@@ -573,18 +748,22 @@ function detectCorners(canvas) {
       cnt.delete();
     }
 
-    if (!best) return fallback;
+    if (!best) return null;
     const pts = [];
     for (let i = 0; i < 4; i++) pts.push({ x: best.data32S[i * 2], y: best.data32S[i * 2 + 1] });
     best.delete();
     return orderCorners(pts);
   } catch (err) {
     console.warn('Détection échouée', err);
-    return fallback;
+    return null;
   } finally {
     src && src.delete(); gray && gray.delete(); blur && blur.delete();
     edges && edges.delete(); contours && contours.delete(); hierarchy && hierarchy.delete();
   }
+}
+
+function detectCorners(canvas) {
+  return detectQuad(canvas) || fallbackRect(canvas.width, canvas.height);
 }
 
 /* ordonne les coins : TL, TR, BR, BL */
