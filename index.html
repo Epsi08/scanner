@@ -1,0 +1,975 @@
+<!DOCTYPE html>
+<html lang="fr">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no, viewport-fit=cover">
+<meta name="apple-mobile-web-app-capable" content="yes">
+<meta name="apple-mobile-web-app-status-bar-style" content="default">
+<meta name="apple-mobile-web-app-title" content="Scanner">
+<meta name="theme-color" content="#ffffff">
+<title>Scanner</title>
+<style>
+  :root {
+    --accent: #F7821B;          /* orange Genius */
+    --accent-dark: #E0700C;
+    --bg: #FFFFFF;
+    --bg-grouped: #F2F2F7;      /* gris iOS */
+    --card: #FFFFFF;
+    --editor-bg: #1C1C1E;       /* fond sombre éditeur */
+    --text: #1C1C1E;
+    --text-2: #8E8E93;
+    --sep: #E5E5EA;
+    --radius: 14px;
+    --safe-top: env(safe-area-inset-top, 0px);
+    --safe-bottom: env(safe-area-inset-bottom, 0px);
+  }
+  * { box-sizing: border-box; -webkit-tap-highlight-color: transparent; }
+  html, body {
+    margin: 0; padding: 0; height: 100%;
+    font-family: -apple-system, BlinkMacSystemFont, "SF Pro Text", system-ui, sans-serif;
+    color: var(--text);
+    background: var(--bg);
+    overflow: hidden;
+    -webkit-font-smoothing: antialiased;
+    overscroll-behavior: none;
+  }
+  button { font-family: inherit; cursor: pointer; border: none; background: none; color: inherit; }
+  .hidden { display: none !important; }
+
+  /* ---------- Écran générique ---------- */
+  .screen {
+    position: fixed; inset: 0;
+    display: flex; flex-direction: column;
+    background: var(--bg);
+  }
+
+  /* ---------- Barre de titre ---------- */
+  .topbar {
+    padding-top: calc(var(--safe-top) + 8px);
+    height: calc(var(--safe-top) + 52px);
+    display: flex; align-items: center; justify-content: center;
+    position: relative;
+    flex-shrink: 0;
+    border-bottom: 1px solid var(--sep);
+    background: var(--bg);
+  }
+  .topbar.dark { background: var(--editor-bg); border-bottom: none; color: #fff; }
+  .topbar .title { font-size: 17px; font-weight: 600; }
+  .topbar .left, .topbar .right {
+    position: absolute; top: calc(var(--safe-top) + 8px); height: 44px;
+    display: flex; align-items: center; gap: 14px;
+  }
+  .topbar .left { left: 12px; }
+  .topbar .right { right: 12px; }
+  .iconbtn {
+    width: 40px; height: 40px; border-radius: 50%;
+    display: flex; align-items: center; justify-content: center;
+    color: var(--accent);
+  }
+  .topbar.dark .iconbtn { color: #fff; background: rgba(255,255,255,.12); }
+  .iconbtn svg { width: 24px; height: 24px; }
+
+  /* ---------- HOME ---------- */
+  #home .content {
+    flex: 1; display: flex; flex-direction: column;
+    overflow-y: auto;
+  }
+  /* état vide */
+  .empty {
+    flex: 1; display: flex; flex-direction: column;
+    align-items: center; justify-content: center; text-align: center;
+    padding: 32px; gap: 14px; color: var(--text-2);
+  }
+  .empty .doc-icon { color: var(--sep); }
+  .empty .doc-icon svg { width: 76px; height: 76px; }
+  .empty h2 { color: var(--text); font-size: 20px; font-weight: 600; margin: 0; }
+  .empty p { margin: 0; font-size: 15px; max-width: 260px; line-height: 1.4; }
+
+  /* galerie de pages */
+  .gallery {
+    display: grid; grid-template-columns: repeat(2, 1fr);
+    gap: 14px; padding: 16px;
+  }
+  .page-card {
+    background: var(--card); border-radius: var(--radius);
+    overflow: hidden; position: relative;
+    box-shadow: 0 1px 4px rgba(0,0,0,.10);
+    aspect-ratio: 3/4;
+  }
+  .page-card img { width: 100%; height: 100%; object-fit: cover; display: block; }
+  .page-card .num {
+    position: absolute; top: 8px; left: 8px;
+    background: rgba(0,0,0,.6); color: #fff;
+    font-size: 12px; font-weight: 600;
+    padding: 2px 8px; border-radius: 20px;
+  }
+
+  /* ---------- Barre d'action du bas (home) ---------- */
+  .bottombar {
+    flex-shrink: 0;
+    display: flex; align-items: center; justify-content: space-around;
+    padding: 10px 12px calc(var(--safe-bottom) + 10px);
+    border-top: 1px solid var(--sep);
+    background: var(--bg);
+  }
+  .bottombar button {
+    display: flex; flex-direction: column; align-items: center; gap: 3px;
+    font-size: 11px; color: var(--text-2); flex: 1;
+  }
+  .bottombar button svg { width: 26px; height: 26px; }
+  .bottombar button.primary { color: var(--accent); }
+
+  /* FAB scanner (état vide) */
+  .fab {
+    position: fixed; bottom: calc(var(--safe-bottom) + 24px); left: 24px;
+    width: 60px; height: 60px; border-radius: 50%;
+    background: var(--accent); color: #fff;
+    display: flex; align-items: center; justify-content: center;
+    box-shadow: 0 4px 14px rgba(247,130,27,.45);
+  }
+  .fab svg { width: 32px; height: 32px; }
+
+  /* ---------- ÉDITEUR ---------- */
+  #editor { background: var(--editor-bg); }
+  #editor .canvas-wrap {
+    flex: 1; position: relative; overflow: hidden;
+    display: flex; align-items: center; justify-content: center;
+    touch-action: none;
+  }
+  #editStage { position: relative; }
+  #editImg { display: block; max-width: 100%; max-height: 100%; }
+  #editSvg { position: absolute; inset: 0; width: 100%; height: 100%; overflow: visible; }
+  .corner {
+    fill: var(--accent); stroke: #fff; stroke-width: 2;
+  }
+  .edge { stroke: var(--accent); stroke-width: 2.5; fill: rgba(247,130,27,.12); }
+
+  /* filtres */
+  .filters {
+    flex-shrink: 0; display: flex; gap: 10px; overflow-x: auto;
+    padding: 14px 16px 6px; background: var(--editor-bg);
+  }
+  .chip {
+    flex-shrink: 0; text-align: center; color: #aaa; font-size: 12px;
+  }
+  .chip .swatch {
+    width: 58px; height: 58px; border-radius: 10px; margin-bottom: 5px;
+    border: 2.5px solid transparent; background: #333;
+    display: flex; align-items: center; justify-content: center;
+    font-size: 11px; color: #888; overflow: hidden;
+  }
+  .chip.active { color: var(--accent); font-weight: 600; }
+  .chip.active .swatch { border-color: var(--accent); }
+
+  /* outils éditeur */
+  .edit-tools {
+    flex-shrink: 0; display: flex; justify-content: space-around;
+    padding: 8px 12px calc(var(--safe-bottom) + 12px);
+    background: var(--editor-bg);
+  }
+  .edit-tools button {
+    display: flex; flex-direction: column; align-items: center; gap: 3px;
+    color: #fff; font-size: 11px;
+  }
+  .edit-tools button svg { width: 24px; height: 24px; }
+  .edit-tools button.danger { color: #FF453A; }
+
+  /* ---------- Feuille d'export ---------- */
+  .sheet-backdrop {
+    position: fixed; inset: 0; background: rgba(0,0,0,.4);
+    display: flex; align-items: flex-end; z-index: 50;
+    animation: fade .2s ease;
+  }
+  @keyframes fade { from { opacity: 0 } to { opacity: 1 } }
+  .sheet {
+    width: 100%; background: var(--bg-grouped);
+    border-radius: 18px 18px 0 0;
+    padding: 8px 16px calc(var(--safe-bottom) + 16px);
+    animation: slideup .25s cubic-bezier(.2,.8,.2,1);
+  }
+  @keyframes slideup { from { transform: translateY(100%) } to { transform: translateY(0) } }
+  .sheet .grabber { width: 38px; height: 5px; border-radius: 3px; background: #C7C7CC; margin: 6px auto 14px; }
+  .sheet h3 { text-align: center; margin: 0 0 4px; font-size: 17px; }
+  .sheet .sub { text-align: center; color: var(--text-2); font-size: 13px; margin-bottom: 18px; }
+  .sheet .sub b { color: var(--accent); }
+  .format-row { display: flex; gap: 12px; margin-bottom: 12px; }
+  .format-row button {
+    flex: 1; background: var(--card); border-radius: var(--radius);
+    padding: 16px 8px; display: flex; flex-direction: column; align-items: center; gap: 6px;
+    font-size: 14px; font-weight: 600; box-shadow: 0 1px 3px rgba(0,0,0,.06);
+  }
+  .format-row button svg { width: 28px; height: 28px; color: var(--accent); }
+  .format-row button .hint { font-size: 11px; font-weight: 400; color: var(--text-2); }
+  .sheet .cancel {
+    width: 100%; background: var(--card); border-radius: var(--radius);
+    padding: 15px; font-size: 16px; font-weight: 600; color: var(--accent);
+    margin-top: 6px; box-shadow: 0 1px 3px rgba(0,0,0,.06);
+  }
+
+  /* ---------- Overlay chargement ---------- */
+  .loader {
+    position: fixed; inset: 0; z-index: 100;
+    background: rgba(0,0,0,.55); color: #fff;
+    display: flex; flex-direction: column; align-items: center; justify-content: center; gap: 16px;
+  }
+  .spinner {
+    width: 42px; height: 42px; border-radius: 50%;
+    border: 4px solid rgba(255,255,255,.25); border-top-color: #fff;
+    animation: spin .8s linear infinite;
+  }
+  @keyframes spin { to { transform: rotate(360deg) } }
+  .loader span { font-size: 15px; }
+
+  /* toast */
+  .toast {
+    position: fixed; bottom: calc(var(--safe-bottom) + 90px); left: 50%; transform: translateX(-50%);
+    background: rgba(0,0,0,.85); color: #fff; padding: 11px 18px; border-radius: 22px;
+    font-size: 14px; z-index: 200; max-width: 86%; text-align: center;
+    animation: fade .2s ease;
+  }
+</style>
+</head>
+<body>
+
+<!-- =================== HOME =================== -->
+<section id="home" class="screen">
+  <div class="topbar">
+    <div class="title">Scanner</div>
+    <div class="right">
+      <button class="iconbtn" id="newDocBtn" title="Nouveau document" aria-label="Nouveau document">
+        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z"/><path d="M14 2v6h6"/><path d="M12 11v6"/><path d="M9 14h6"/></svg>
+      </button>
+    </div>
+  </div>
+
+  <div class="content" id="homeContent">
+    <!-- état vide -->
+    <div class="empty" id="emptyState">
+      <div class="doc-icon">
+        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"><path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z"/><path d="M14 2v6h6"/></svg>
+      </div>
+      <h2>Aucune page</h2>
+      <p>Appuie sur le bouton pour scanner ton premier document.</p>
+    </div>
+
+    <!-- galerie (cachée tant que vide) -->
+    <div class="gallery hidden" id="gallery"></div>
+  </div>
+
+  <!-- FAB visible en état vide -->
+  <button class="fab" id="fabScan" aria-label="Scanner">
+    <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M3 7V5a2 2 0 0 1 2-2h2"/><path d="M17 3h2a2 2 0 0 1 2 2v2"/><path d="M21 17v2a2 2 0 0 1-2 2h-2"/><path d="M7 21H5a2 2 0 0 1-2-2v-2"/><circle cx="12" cy="12" r="3.5"/></svg>
+  </button>
+
+  <!-- barre du bas visible dès qu'il y a des pages -->
+  <div class="bottombar hidden" id="homeBar">
+    <button id="addPagesBtn">
+      <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M12 5v14M5 12h14"/></svg>
+      Ajouter
+    </button>
+    <button class="primary" id="exportBtn">
+      <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M4 12v8a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2v-8"/><path d="M12 2v14"/><path d="m7 7 5-5 5 5"/></svg>
+      Exporter
+    </button>
+  </div>
+</section>
+
+<!-- =================== ÉDITEUR =================== -->
+<section id="editor" class="screen hidden">
+  <div class="topbar dark">
+    <button class="iconbtn" id="editCancel" style="position:absolute;left:12px;top:calc(var(--safe-top) + 8px);">
+      <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M18 6 6 18M6 6l12 12"/></svg>
+    </button>
+    <div class="title">Ajuster</div>
+    <button class="iconbtn" id="editDone" style="position:absolute;right:12px;top:calc(var(--safe-top) + 8px);color:var(--accent);font-weight:700;width:auto;border-radius:20px;padding:0 6px;">
+      <span style="font-size:16px;font-weight:600;">OK</span>
+    </button>
+  </div>
+
+  <div class="canvas-wrap" id="canvasWrap">
+    <div id="editStage">
+      <img id="editImg" alt="">
+      <svg id="editSvg"></svg>
+    </div>
+  </div>
+
+  <div class="filters" id="filters">
+    <button class="chip active" data-filter="auto"><div class="swatch">N&amp;B</div>Auto</button>
+    <button class="chip" data-filter="bw"><div class="swatch">N&amp;B</div>Renforcé</button>
+    <button class="chip" data-filter="gray"><div class="swatch">Gris</div>Gris</button>
+    <button class="chip" data-filter="color"><div class="swatch">Coul.</div>Couleur</button>
+  </div>
+
+  <div class="edit-tools">
+    <button id="rotL">
+      <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M3 12a9 9 0 1 0 3-6.7L3 8"/><path d="M3 3v5h5"/></svg>
+      Gauche
+    </button>
+    <button id="rotR">
+      <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M21 12a9 9 0 1 1-3-6.7L21 8"/><path d="M21 3v5h-5"/></svg>
+      Droite
+    </button>
+    <button id="resetCorners">
+      <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M3 7V5a2 2 0 0 1 2-2h2"/><path d="M17 3h2a2 2 0 0 1 2 2v2"/><path d="M21 17v2a2 2 0 0 1-2 2h-2"/><path d="M7 21H5a2 2 0 0 1-2-2v-2"/></svg>
+      Tout
+    </button>
+    <button class="danger" id="deletePage">
+      <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M3 6h18M8 6V4a2 2 0 0 1 2-2h4a2 2 0 0 1 2 2v2M19 6l-1 14a2 2 0 0 1-2 2H8a2 2 0 0 1-2-2L5 6"/></svg>
+      Suppr.
+    </button>
+  </div>
+</section>
+
+<!-- input caméra natif -->
+<input type="file" id="cameraInput" accept="image/*" capture="environment" class="hidden">
+
+<!-- loader -->
+<div class="loader hidden" id="loader"><div class="spinner"></div><span id="loaderText">Traitement…</span></div>
+
+<!-- libs -->
+<script src="https://cdnjs.cloudflare.com/ajax/libs/jspdf/2.5.1/jspdf.umd.min.js"></script>
+<script>
+/* ============================================================
+   État global
+   ============================================================ */
+let cvReady = false;
+const pages = [];          // { canvas (rendu final), thumb (dataURL) }
+let editState = null;      // état de l'éditeur en cours
+
+const $ = (id) => document.getElementById(id);
+
+/* OpenCV chargé en différé (gros fichier ~8 Mo) */
+function loadOpenCV() {
+  const s = document.createElement('script');
+  s.src = 'https://docs.opencv.org/4.x/opencv.js';
+  s.async = true;
+  s.onload = () => {
+    if (window.cv && cv.getBuildInformation) { cvReady = true; }
+    else if (window.cv) { cv['onRuntimeInitialized'] = () => { cvReady = true; }; }
+  };
+  s.onerror = () => console.warn('OpenCV non chargé — mode dégradé');
+  document.body.appendChild(s);
+}
+loadOpenCV();
+
+/* ============================================================
+   Helpers UI
+   ============================================================ */
+function showLoader(txt) { $('loaderText').textContent = txt || 'Traitement…'; $('loader').classList.remove('hidden'); }
+function hideLoader() { $('loader').classList.add('hidden'); }
+function toast(msg) {
+  const t = document.createElement('div');
+  t.className = 'toast'; t.textContent = msg;
+  document.body.appendChild(t);
+  setTimeout(() => t.remove(), 2600);
+}
+function show(screen) {
+  $('home').classList.toggle('hidden', screen !== 'home');
+  $('editor').classList.toggle('hidden', screen !== 'editor');
+}
+
+/* ============================================================
+   HOME — galerie
+   ============================================================ */
+function refreshHome() {
+  const has = pages.length > 0;
+  $('emptyState').classList.toggle('hidden', has);
+  $('gallery').classList.toggle('hidden', !has);
+  $('homeBar').classList.toggle('hidden', !has);
+  $('fabScan').classList.toggle('hidden', has);   // FAB seulement en état vide
+
+  const g = $('gallery');
+  g.innerHTML = '';
+  pages.forEach((p, i) => {
+    const card = document.createElement('div');
+    card.className = 'page-card';
+    card.innerHTML = `<span class="num">${i + 1}</span><img src="${p.thumb}" alt="Page ${i + 1}">`;
+    card.addEventListener('click', () => openEditorForPage(i));
+    g.appendChild(card);
+  });
+}
+
+/* ============================================================
+   Capture caméra
+   ============================================================ */
+let addingPage = false;
+$('fabScan').addEventListener('click', () => triggerCamera());
+$('addPagesBtn').addEventListener('click', () => triggerCamera());
+$('newDocBtn').addEventListener('click', () => {
+  if (pages.length && !confirm('Démarrer un nouveau document ? Les pages actuelles seront supprimées (pense à exporter avant).')) return;
+  pages.length = 0; refreshHome();
+});
+
+function triggerCamera() {
+  addingPage = pages.length > 0;
+  $('cameraInput').value = '';
+  $('cameraInput').click();
+}
+
+$('cameraInput').addEventListener('change', async (e) => {
+  const file = e.target.files && e.target.files[0];
+  if (!file) return;
+  showLoader('Lecture de la photo…');
+  try {
+    const bmp = await loadBitmap(file);
+    const baseCanvas = bitmapToCanvas(bmp, 2000);
+    showLoader('Détection des bords…');
+    const corners = detectCorners(baseCanvas);
+    openEditor({ base: baseCanvas, corners, rotation: 0, filter: 'auto', pageIndex: null });
+  } catch (err) {
+    console.error(err);
+    toast('Impossible de lire cette image.');
+  } finally {
+    hideLoader();
+  }
+});
+
+/* Charge un fichier image -> ImageBitmap avec orientation EXIF corrigée */
+async function loadBitmap(file) {
+  try {
+    return await createImageBitmap(file, { imageOrientation: 'from-image' });
+  } catch (_) {
+    // fallback : <img>
+    return await new Promise((res, rej) => {
+      const img = new Image();
+      img.onload = () => res(img);
+      img.onerror = rej;
+      img.src = URL.createObjectURL(file);
+    });
+  }
+}
+
+function bitmapToCanvas(bmp, maxSide) {
+  let w = bmp.width, h = bmp.height;
+  const scale = Math.min(1, maxSide / Math.max(w, h));
+  w = Math.round(w * scale); h = Math.round(h * scale);
+  const c = document.createElement('canvas');
+  c.width = w; c.height = h;
+  c.getContext('2d').drawImage(bmp, 0, 0, w, h);
+  return c;
+}
+
+/* ============================================================
+   Détection des coins (OpenCV) — fallback marge par défaut
+   ============================================================ */
+function detectCorners(canvas) {
+  const W = canvas.width, H = canvas.height;
+  const margin = 0.04;
+  const fallback = [
+    { x: W * margin,       y: H * margin },
+    { x: W * (1 - margin), y: H * margin },
+    { x: W * (1 - margin), y: H * (1 - margin) },
+    { x: W * margin,       y: H * (1 - margin) },
+  ];
+  if (!cvReady) return fallback;
+
+  let src, gray, blur, edges, contours, hierarchy;
+  try {
+    src = cv.imread(canvas);
+    gray = new cv.Mat(); cv.cvtColor(src, gray, cv.COLOR_RGBA2GRAY);
+    blur = new cv.Mat(); cv.GaussianBlur(gray, blur, new cv.Size(5, 5), 0);
+    edges = new cv.Mat(); cv.Canny(blur, edges, 75, 200);
+    const k = cv.Mat.ones(3, 3, cv.CV_8U);
+    cv.dilate(edges, edges, k); k.delete();
+
+    contours = new cv.MatVector(); hierarchy = new cv.Mat();
+    cv.findContours(edges, contours, hierarchy, cv.RETR_LIST, cv.CHAIN_APPROX_SIMPLE);
+
+    let best = null, bestArea = (W * H) * 0.15; // au moins 15% de l'image
+    for (let i = 0; i < contours.size(); i++) {
+      const cnt = contours.get(i);
+      const peri = cv.arcLength(cnt, true);
+      const approx = new cv.Mat();
+      cv.approxPolyDP(cnt, approx, 0.02 * peri, true);
+      if (approx.rows === 4) {
+        const area = Math.abs(cv.contourArea(approx));
+        if (area > bestArea) {
+          bestArea = area;
+          if (best) best.delete();
+          best = approx;
+        } else approx.delete();
+      } else approx.delete();
+      cnt.delete();
+    }
+
+    if (!best) return fallback;
+    const pts = [];
+    for (let i = 0; i < 4; i++) pts.push({ x: best.data32S[i * 2], y: best.data32S[i * 2 + 1] });
+    best.delete();
+    return orderCorners(pts);
+  } catch (err) {
+    console.warn('Détection échouée', err);
+    return fallback;
+  } finally {
+    src && src.delete(); gray && gray.delete(); blur && blur.delete();
+    edges && edges.delete(); contours && contours.delete(); hierarchy && hierarchy.delete();
+  }
+}
+
+/* ordonne les coins : TL, TR, BR, BL */
+function orderCorners(pts) {
+  const bySum = [...pts].sort((a, b) => (a.x + a.y) - (b.x + b.y));
+  const tl = bySum[0], br = bySum[3];
+  const byDiff = [...pts].sort((a, b) => (a.y - a.x) - (b.y - b.x));
+  const tr = byDiff[0], bl = byDiff[3];
+  return [tl, tr, br, bl];
+}
+
+/* ============================================================
+   ÉDITEUR
+   ============================================================ */
+const DISPLAY_MAX = 1; // ratio géré par CSS, on stocke l'échelle
+let dragIndex = -1;
+
+function openEditor(state) {
+  editState = state;
+  show('editor');
+  const img = $('editImg');
+  // rendu de base (rotation appliquée visuellement)
+  const disp = rotatedCanvas(state.base, state.rotation);
+  img.src = disp.toDataURL('image/jpeg', 0.85);
+  img.onload = () => layoutEditor();
+}
+
+function openEditorForPage(i) {
+  // ré-édition : on repart de la source d'origine de la page si dispo
+  const p = pages[i];
+  openEditor({ base: p.base, corners: p.corners, rotation: p.rotation, filter: p.filter, pageIndex: i });
+}
+
+function rotatedCanvas(canvas, deg) {
+  deg = ((deg % 360) + 360) % 360;
+  if (deg === 0) return canvas;
+  const c = document.createElement('canvas');
+  const swap = (deg === 90 || deg === 270);
+  c.width = swap ? canvas.height : canvas.width;
+  c.height = swap ? canvas.width : canvas.height;
+  const ctx = c.getContext('2d');
+  ctx.translate(c.width / 2, c.height / 2);
+  ctx.rotate(deg * Math.PI / 180);
+  ctx.drawImage(canvas, -canvas.width / 2, -canvas.height / 2);
+  return c;
+}
+
+/* coordonnées des coins après rotation visuelle */
+function rotateCorners(corners, baseW, baseH, deg) {
+  deg = ((deg % 360) + 360) % 360;
+  return corners.map(p => {
+    if (deg === 0)   return { x: p.x,          y: p.y };
+    if (deg === 90)  return { x: baseH - p.y,  y: p.x };
+    if (deg === 180) return { x: baseW - p.x,  y: baseH - p.y };
+    return { x: p.y, y: baseW - p.x }; // 270
+  });
+}
+
+function layoutEditor() {
+  const img = $('editImg');
+  const stage = $('editStage');
+  const svg = $('editSvg');
+  // taille affichée réelle
+  const dispW = img.clientWidth, dispH = img.clientHeight;
+  stage.style.width = dispW + 'px';
+  stage.style.height = dispH + 'px';
+  svg.setAttribute('viewBox', `0 0 ${dispW} ${dispH}`);
+
+  // facteur image source (après rotation) -> affichage
+  const rc = rotatedCanvas(editState.base, editState.rotation);
+  const sx = dispW / rc.width, sy = dispH / rc.height;
+  const cornersRot = rotateCorners(editState.corners, editState.base.width, editState.base.height, editState.rotation);
+  editState._disp = cornersRot.map(p => ({ x: p.x * sx, y: p.y * sy }));
+  editState._scale = { sx, sy, srcW: rc.width, srcH: rc.height };
+  drawEditor();
+}
+
+function drawEditor() {
+  const svg = $('editSvg');
+  const c = editState._disp;
+  svg.innerHTML = '';
+  const ns = 'http://www.w3.org/2000/svg';
+  // polygone
+  const poly = document.createElementNS(ns, 'polygon');
+  poly.setAttribute('points', c.map(p => `${p.x},${p.y}`).join(' '));
+  poly.setAttribute('class', 'edge');
+  svg.appendChild(poly);
+  // poignées
+  c.forEach((p, i) => {
+    const circ = document.createElementNS(ns, 'circle');
+    circ.setAttribute('cx', p.x); circ.setAttribute('cy', p.y);
+    circ.setAttribute('r', 13); circ.setAttribute('class', 'corner');
+    circ.dataset.i = i;
+    svg.appendChild(circ);
+  });
+}
+
+/* drag des poignées (tactile + souris) */
+function pointerPos(e) {
+  const r = $('editSvg').getBoundingClientRect();
+  const t = e.touches ? e.touches[0] : e;
+  return { x: t.clientX - r.left, y: t.clientY - r.top };
+}
+function nearestCorner(pos) {
+  let idx = -1, min = 40 * 40;
+  editState._disp.forEach((p, i) => {
+    const d = (p.x - pos.x) ** 2 + (p.y - pos.y) ** 2;
+    if (d < min) { min = d; idx = i; }
+  });
+  return idx;
+}
+function startDrag(e) {
+  if (!editState) return;
+  const pos = pointerPos(e);
+  dragIndex = nearestCorner(pos);
+  if (dragIndex >= 0) e.preventDefault();
+}
+function moveDrag(e) {
+  if (dragIndex < 0) return;
+  e.preventDefault();
+  const pos = pointerPos(e);
+  const d = editState._disp;
+  d[dragIndex].x = Math.max(0, Math.min(editState._scale.srcW * editState._scale.sx, pos.x));
+  d[dragIndex].y = Math.max(0, Math.min(editState._scale.srcH * editState._scale.sy, pos.y));
+  drawEditor();
+}
+function endDrag() { dragIndex = -1; }
+
+const wrap = $('canvasWrap');
+wrap.addEventListener('touchstart', startDrag, { passive: false });
+wrap.addEventListener('touchmove', moveDrag, { passive: false });
+wrap.addEventListener('touchend', endDrag);
+wrap.addEventListener('mousedown', startDrag);
+window.addEventListener('mousemove', moveDrag);
+window.addEventListener('mouseup', endDrag);
+
+/* boutons éditeur */
+$('rotL').addEventListener('click', () => { editState.rotation -= 90; reopenEditorImg(); });
+$('rotR').addEventListener('click', () => { editState.rotation += 90; reopenEditorImg(); });
+$('resetCorners').addEventListener('click', () => {
+  const rc = rotatedCanvas(editState.base, editState.rotation);
+  const m = 0.04;
+  editState._disp = [
+    { x: rc.width * m * editState._scale.sx, y: rc.height * m * editState._scale.sy },
+    { x: rc.width * (1 - m) * editState._scale.sx, y: rc.height * m * editState._scale.sy },
+    { x: rc.width * (1 - m) * editState._scale.sx, y: rc.height * (1 - m) * editState._scale.sy },
+    { x: rc.width * m * editState._scale.sx, y: rc.height * (1 - m) * editState._scale.sy },
+  ];
+  drawEditor();
+});
+function reopenEditorImg() {
+  const img = $('editImg');
+  const disp = rotatedCanvas(editState.base, editState.rotation);
+  img.src = disp.toDataURL('image/jpeg', 0.85);
+  img.onload = () => layoutEditor();
+}
+
+/* filtres */
+document.querySelectorAll('.chip').forEach(ch => {
+  ch.addEventListener('click', () => {
+    document.querySelectorAll('.chip').forEach(c => c.classList.remove('active'));
+    ch.classList.add('active');
+    editState.filter = ch.dataset.filter;
+  });
+});
+
+/* annuler / supprimer */
+$('editCancel').addEventListener('click', () => { editState = null; show('home'); refreshHome(); });
+$('deletePage').addEventListener('click', () => {
+  if (editState.pageIndex !== null) {
+    if (!confirm('Supprimer cette page ?')) return;
+    pages.splice(editState.pageIndex, 1);
+  }
+  editState = null; show('home'); refreshHome();
+});
+
+/* valider */
+$('editDone').addEventListener('click', async () => {
+  showLoader('Application…');
+  try {
+    await new Promise(r => setTimeout(r, 30));
+    const result = renderPage(editState);
+    const pageData = {
+      base: editState.base,
+      corners: dispToSource(editState),
+      rotation: editState.rotation,
+      filter: editState.filter,
+      canvas: result,
+      thumb: result.toDataURL('image/jpeg', 0.6),
+    };
+    if (editState.pageIndex !== null) pages[editState.pageIndex] = pageData;
+    else pages.push(pageData);
+    editState = null;
+    hideLoader();
+    show('home'); refreshHome();
+  } catch (err) {
+    console.error(err); hideLoader(); toast('Erreur de traitement.');
+  }
+});
+
+/* convertit les coins affichés -> coords source d'origine (avant rotation) */
+function dispToSource(st) {
+  const { sx, sy } = st._scale;
+  const rotPts = st._disp.map(p => ({ x: p.x / sx, y: p.y / sy }));
+  // inverse de rotateCorners
+  const deg = ((st.rotation % 360) + 360) % 360;
+  const rc = rotatedCanvas(st.base, deg);
+  const W = st.base.width, H = st.base.height;
+  return rotPts.map(p => {
+    if (deg === 0)   return { x: p.x, y: p.y };
+    if (deg === 90)  return { x: p.y, y: rc.width - p.x };
+    if (deg === 180) return { x: W - p.x, y: H - p.y };
+    return { x: rc.height - p.y, y: p.x }; // 270
+  });
+}
+
+/* ============================================================
+   Rendu final d'une page : warp + filtre
+   ============================================================ */
+function renderPage(st) {
+  const rc = rotatedCanvas(st.base, st.rotation);
+  const corners = st._disp.map(p => ({ x: p.x / st._scale.sx, y: p.y / st._scale.sy }));
+  const [tl, tr, br, bl] = corners;
+  const wTop = dist(tl, tr), wBot = dist(bl, br);
+  const hL = dist(tl, bl), hR = dist(tr, br);
+  let outW = Math.round(Math.max(wTop, wBot));
+  let outH = Math.round(Math.max(hL, hR));
+  outW = Math.max(50, outW); outH = Math.max(50, outH);
+
+  let warped;
+  if (cvReady) warped = warpCv(rc, corners, outW, outH);
+  else warped = warpFallback(rc, corners, outW, outH);
+
+  return applyFilter(warped, st.filter);
+}
+function dist(a, b) { return Math.hypot(a.x - b.x, a.y - b.y); }
+
+function warpCv(canvas, c, outW, outH) {
+  const src = cv.imread(canvas);
+  const dst = new cv.Mat();
+  const srcTri = cv.matFromArray(4, 1, cv.CV_32FC2, [c[0].x, c[0].y, c[1].x, c[1].y, c[2].x, c[2].y, c[3].x, c[3].y]);
+  const dstTri = cv.matFromArray(4, 1, cv.CV_32FC2, [0, 0, outW, 0, outW, outH, 0, outH]);
+  const M = cv.getPerspectiveTransform(srcTri, dstTri);
+  cv.warpPerspective(src, dst, M, new cv.Size(outW, outH), cv.INTER_LINEAR, cv.BORDER_CONSTANT, new cv.Scalar(255, 255, 255, 255));
+  const out = document.createElement('canvas');
+  out.width = outW; out.height = outH;
+  cv.imshow(out, dst);
+  src.delete(); dst.delete(); srcTri.delete(); dstTri.delete(); M.delete();
+  return out;
+}
+
+/* fallback : simple crop à la bounding box (sans correction de perspective) */
+function warpFallback(canvas, c, outW, outH) {
+  const minX = Math.min(...c.map(p => p.x)), maxX = Math.max(...c.map(p => p.x));
+  const minY = Math.min(...c.map(p => p.y)), maxY = Math.max(...c.map(p => p.y));
+  const out = document.createElement('canvas');
+  out.width = outW; out.height = outH;
+  out.getContext('2d').drawImage(canvas, minX, minY, maxX - minX, maxY - minY, 0, 0, outW, outH);
+  return out;
+}
+
+/* ============================================================
+   Filtres
+   ============================================================ */
+function applyFilter(canvas, filter) {
+  if (filter === 'color') return canvas;
+  if (cvReady && (filter === 'auto' || filter === 'bw')) {
+    return bwCv(canvas, filter === 'bw');
+  }
+  // gris ou fallback
+  return grayJs(canvas, filter !== 'gray'); // si pas gris -> seuillage Otsu
+}
+
+function bwCv(canvas, strong) {
+  const src = cv.imread(canvas);
+  const gray = new cv.Mat();
+  cv.cvtColor(src, gray, cv.COLOR_RGBA2GRAY);
+  const dst = new cv.Mat();
+  const block = 25, C = strong ? 15 : 12;
+  cv.adaptiveThreshold(gray, dst, 255, cv.ADAPTIVE_THRESH_GAUSSIAN_C, cv.THRESH_BINARY, block, C);
+  const out = document.createElement('canvas');
+  out.width = canvas.width; out.height = canvas.height;
+  cv.imshow(out, dst);
+  src.delete(); gray.delete(); dst.delete();
+  return out;
+}
+
+/* gris pur, ou seuillage Otsu en JS si threshold=true */
+function grayJs(canvas, threshold) {
+  const ctx = canvas.getContext('2d');
+  const im = ctx.getImageData(0, 0, canvas.width, canvas.height);
+  const d = im.data;
+  const hist = new Array(256).fill(0);
+  for (let i = 0; i < d.length; i += 4) {
+    const g = (d[i] * 0.299 + d[i + 1] * 0.587 + d[i + 2] * 0.114) | 0;
+    d[i] = d[i + 1] = d[i + 2] = g;
+    hist[g]++;
+  }
+  if (threshold) {
+    const total = canvas.width * canvas.height;
+    let sum = 0; for (let i = 0; i < 256; i++) sum += i * hist[i];
+    let sumB = 0, wB = 0, max = 0, thr = 127;
+    for (let i = 0; i < 256; i++) {
+      wB += hist[i]; if (!wB) continue;
+      const wF = total - wB; if (!wF) break;
+      sumB += i * hist[i];
+      const mB = sumB / wB, mF = (sum - sumB) / wF;
+      const between = wB * wF * (mB - mF) ** 2;
+      if (between > max) { max = between; thr = i; }
+    }
+    for (let i = 0; i < d.length; i += 4) {
+      const v = d[i] > thr ? 255 : 0;
+      d[i] = d[i + 1] = d[i + 2] = v;
+    }
+  }
+  ctx.putImageData(im, 0, 0);
+  return canvas;
+}
+
+/* ============================================================
+   EXPORT (PDF / JPG) + partage natif
+   ============================================================ */
+$('exportBtn').addEventListener('click', openExportSheet);
+
+function openExportSheet() {
+  if (!pages.length) return;
+  const bd = document.createElement('div');
+  bd.className = 'sheet-backdrop';
+  bd.innerHTML = `
+    <div class="sheet" onclick="event.stopPropagation()">
+      <div class="grabber"></div>
+      <h3>Exporter</h3>
+      <div class="sub"><b>${pages.length}</b> page${pages.length > 1 ? 's' : ''} · choisis le format</div>
+      <div class="format-row">
+        <button id="expPdf">
+          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z"/><path d="M14 2v6h6"/></svg>
+          PDF
+          <span class="hint">1 fichier, multi-pages</span>
+        </button>
+        <button id="expJpg">
+          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="3" y="3" width="18" height="18" rx="2"/><circle cx="9" cy="9" r="2"/><path d="m21 15-5-5L5 21"/></svg>
+          Image
+          <span class="hint">JPG · 1 par page</span>
+        </button>
+      </div>
+      <button class="cancel" id="expCancel">Annuler</button>
+    </div>`;
+  bd.addEventListener('click', () => bd.remove());
+  document.body.appendChild(bd);
+  $('expCancel').addEventListener('click', () => bd.remove());
+  $('expPdf').addEventListener('click', () => { bd.remove(); exportPDF(); });
+  $('expJpg').addEventListener('click', () => { bd.remove(); exportJPG(); });
+}
+
+function dateStamp() {
+  const d = new Date();
+  const p = n => String(n).padStart(2, '0');
+  return `${d.getFullYear()}-${p(d.getMonth() + 1)}-${p(d.getDate())}`;
+}
+
+async function exportPDF() {
+  showLoader('Création du PDF…');
+  try {
+    const { jsPDF } = window.jspdf;
+    const pdf = new jsPDF({ unit: 'mm', format: 'a4' });
+    const pageW = 210, pageH = 297, margin = 8;
+    const maxW = pageW - margin * 2, maxH = pageH - margin * 2;
+    pages.forEach((p, i) => {
+      if (i > 0) pdf.addPage();
+      const c = p.canvas;
+      const ratio = Math.min(maxW / c.width, maxH / c.height);
+      const w = c.width * ratio, h = c.height * ratio;
+      const x = (pageW - w) / 2, y = (pageH - h) / 2;
+      const data = c.toDataURL('image/jpeg', 0.85);
+      pdf.addImage(data, 'JPEG', x, y, w, h);
+    });
+    const name = `Scan_${dateStamp()}.pdf`;
+    const blob = pdf.output('blob');
+    await shareOrDownload(blob, name, 'application/pdf');
+  } catch (err) {
+    console.error(err); toast('Erreur PDF.');
+  } finally { hideLoader(); }
+}
+
+async function exportJPG() {
+  showLoader('Préparation…');
+  try {
+    const files = [];
+    for (let i = 0; i < pages.length; i++) {
+      const blob = await new Promise(r => pages[i].canvas.toBlob(r, 'image/jpeg', 0.9));
+      const suffix = pages.length > 1 ? `_${i + 1}` : '';
+      files.push(new File([blob], `Scan_${dateStamp()}${suffix}.jpg`, { type: 'image/jpeg' }));
+    }
+    if (navigator.canShare && navigator.canShare({ files })) {
+      hideLoader();
+      await navigator.share({ files, title: 'Scan' });
+    } else {
+      // pas de partage multi-fichiers : on télécharge chacun
+      hideLoader();
+      files.forEach(f => downloadFile(f, f.name));
+      toast('Images téléchargées.');
+    }
+  } catch (err) {
+    if (err && err.name === 'AbortError') { hideLoader(); return; }
+    console.error(err); hideLoader(); toast('Erreur image.');
+  }
+}
+
+async function shareOrDownload(blob, name, type) {
+  const file = new File([blob], name, { type });
+  if (navigator.canShare && navigator.canShare({ files: [file] })) {
+    try { await navigator.share({ files: [file], title: name }); return; }
+    catch (err) { if (err && err.name === 'AbortError') return; }
+  }
+  downloadFile(blob, name);
+  toast('Fichier téléchargé.');
+}
+
+function downloadFile(blob, name) {
+  const url = URL.createObjectURL(blob);
+  const a = document.createElement('a');
+  a.href = url; a.download = name;
+  document.body.appendChild(a); a.click(); a.remove();
+  setTimeout(() => URL.revokeObjectURL(url), 1500);
+}
+
+/* ============================================================
+   PWA (manifest injecté à la volée)
+   ============================================================ */
+(function injectManifest() {
+  const icon = (sz) => {
+    const c = document.createElement('canvas');
+    c.width = c.height = sz;
+    const ctx = c.getContext('2d');
+    ctx.fillStyle = '#F7821B'; ctx.fillRect(0, 0, sz, sz);
+    ctx.strokeStyle = '#fff'; ctx.lineWidth = sz * 0.06; ctx.lineCap = 'round'; ctx.lineJoin = 'round';
+    const m = sz * 0.28, q = sz * 0.12;
+    ctx.beginPath();
+    ctx.moveTo(m, m + q); ctx.lineTo(m, m); ctx.lineTo(m + q, m); // TL
+    ctx.moveTo(sz - m - q, m); ctx.lineTo(sz - m, m); ctx.lineTo(sz - m, m + q); // TR
+    ctx.moveTo(sz - m, sz - m - q); ctx.lineTo(sz - m, sz - m); ctx.lineTo(sz - m - q, sz - m); // BR
+    ctx.moveTo(m + q, sz - m); ctx.lineTo(m, sz - m); ctx.lineTo(m, sz - m - q); // BL
+    ctx.stroke();
+    return c.toDataURL('image/png');
+  };
+  const manifest = {
+    name: 'Scanner', short_name: 'Scanner',
+    start_url: '.', display: 'standalone',
+    background_color: '#ffffff', theme_color: '#ffffff',
+    icons: [
+      { src: icon(192), sizes: '192x192', type: 'image/png' },
+      { src: icon(512), sizes: '512x512', type: 'image/png' },
+    ],
+  };
+  const blob = new Blob([JSON.stringify(manifest)], { type: 'application/json' });
+  const link = document.createElement('link');
+  link.rel = 'manifest'; link.href = URL.createObjectURL(blob);
+  document.head.appendChild(link);
+  // icône Apple
+  const apple = document.createElement('link');
+  apple.rel = 'apple-touch-icon'; apple.href = icon(180);
+  document.head.appendChild(apple);
+})();
+
+/* init */
+refreshHome();
+</script>
+</body>
+</html>
