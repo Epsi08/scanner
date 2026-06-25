@@ -209,6 +209,26 @@
   .edit-tools button svg { width: 24px; height: 24px; }
   .edit-tools button.danger { color: #FF453A; }
 
+  /* ---------- APERÇU GRAND FORMAT ---------- */
+  #viewer { background: var(--editor-bg); }
+  .viewer-body {
+    flex: 1; position: relative; display: flex; align-items: center; justify-content: center;
+    overflow: hidden; padding: 10px;
+  }
+  #viewerImg {
+    max-width: 100%; max-height: 100%; object-fit: contain;
+    box-shadow: 0 4px 24px rgba(0,0,0,.5); background: #fff;
+  }
+  .viewer-nav {
+    position: absolute; top: 50%; transform: translateY(-50%);
+    width: 44px; height: 44px; border-radius: 50%;
+    background: rgba(255,255,255,.14); color: #fff;
+    display: flex; align-items: center; justify-content: center; z-index: 2;
+  }
+  .viewer-nav svg { width: 26px; height: 26px; }
+  #viewerPrev { left: 8px; } #viewerNext { right: 8px; }
+  .viewer-nav.hidden { display: none; }
+
   /* ---------- CAMÉRA LIVE ---------- */
   #camera { background: #000; }
   #camVideo {
@@ -403,6 +423,39 @@
   </div>
 </section>
 
+<!-- =================== APERÇU GRAND FORMAT =================== -->
+<section id="viewer" class="screen hidden">
+  <div class="topbar dark">
+    <button class="iconbtn" id="viewerBack" style="position:absolute;left:12px;top:calc(var(--safe-top) + 8px);">
+      <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="m15 18-6-6 6-6"/></svg>
+    </button>
+    <div class="title" id="viewerTitle">Page</div>
+  </div>
+  <div class="viewer-body" id="viewerBody">
+    <button class="viewer-nav" id="viewerPrev" aria-label="Précédente">
+      <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round"><path d="m15 18-6-6 6-6"/></svg>
+    </button>
+    <img id="viewerImg" alt="Aperçu">
+    <button class="viewer-nav" id="viewerNext" aria-label="Suivante">
+      <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round"><path d="m9 18 6-6-6-6"/></svg>
+    </button>
+  </div>
+  <div class="edit-tools">
+    <button id="viewerEdit">
+      <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M12 20h9"/><path d="M16.5 3.5a2.12 2.12 0 0 1 3 3L7 19l-4 1 1-4Z"/></svg>
+      Modifier
+    </button>
+    <button id="viewerExport">
+      <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M4 12v8a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2v-8"/><path d="M12 2v14"/><path d="m7 7 5-5 5 5"/></svg>
+      Exporter
+    </button>
+    <button class="danger" id="viewerDelete">
+      <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M3 6h18M8 6V4a2 2 0 0 1 2-2h4a2 2 0 0 1 2 2v2M19 6l-1 14a2 2 0 0 1-2 2H8a2 2 0 0 1-2-2L5 6"/></svg>
+      Suppr.
+    </button>
+  </div>
+</section>
+
 <!-- =================== CAMÉRA LIVE =================== -->
 <section id="camera" class="screen hidden">
   <video id="camVideo" playsinline muted autoplay></video>
@@ -466,7 +519,31 @@ function show(screen) {
   $('home').classList.toggle('hidden', screen !== 'home');
   $('editor').classList.toggle('hidden', screen !== 'editor');
   $('camera').classList.toggle('hidden', screen !== 'camera');
+  $('viewer').classList.toggle('hidden', screen !== 'viewer');
 }
+
+/* ---------- Aperçu grand format ---------- */
+let viewerIndex = -1;
+function openPageViewer(i) {
+  if (i < 0 || i >= pages.length) return;
+  viewerIndex = i;
+  show('viewer');
+  $('viewerTitle').textContent = `Page ${i + 1} sur ${pages.length}`;
+  $('viewerImg').src = pages[i].canvas.toDataURL('image/jpeg', 0.92);
+  $('viewerPrev').classList.toggle('hidden', i === 0);
+  $('viewerNext').classList.toggle('hidden', i === pages.length - 1);
+}
+$('viewerBack').addEventListener('click', () => { show('home'); refreshHome(); });
+$('viewerPrev').addEventListener('click', () => openPageViewer(viewerIndex - 1));
+$('viewerNext').addEventListener('click', () => openPageViewer(viewerIndex + 1));
+$('viewerEdit').addEventListener('click', () => openEditorForPage(viewerIndex));
+$('viewerExport').addEventListener('click', () => openExportSheet());
+$('viewerDelete').addEventListener('click', () => {
+  if (!confirm('Supprimer cette page ?')) return;
+  pages.splice(viewerIndex, 1);
+  if (pages.length === 0) { show('home'); refreshHome(); }
+  else openPageViewer(Math.min(viewerIndex, pages.length - 1));
+});
 
 /* ============================================================
    HOME — galerie
@@ -484,7 +561,7 @@ function refreshHome() {
     const card = document.createElement('div');
     card.className = 'page-card';
     card.innerHTML = `<span class="num">${i + 1}</span><img src="${p.thumb}" alt="Page ${i + 1}">`;
-    card.addEventListener('click', () => openEditorForPage(i));
+    card.addEventListener('click', () => openPageViewer(i));
     g.appendChild(card);
   });
 }
@@ -1051,11 +1128,13 @@ $('editDone').addEventListener('click', async () => {
       canvas: result,
       thumb: result.toDataURL('image/jpeg', 0.6),
     };
-    if (editState.pageIndex !== null) pages[editState.pageIndex] = pageData;
-    else pages.push(pageData);
+    let idx;
+    if (editState.pageIndex !== null) { idx = editState.pageIndex; pages[idx] = pageData; }
+    else { pages.push(pageData); idx = pages.length - 1; }
     editState = null;
     hideLoader();
-    show('home'); refreshHome();
+    refreshHome();
+    openPageViewer(idx);   // après validation -> aperçu en grand
   } catch (err) {
     console.error(err); hideLoader(); toast('Erreur de traitement.');
   }
@@ -1130,23 +1209,50 @@ function applyFilter(canvas, filter, darkness) {
   if (filter === 'gray') return grayJs(canvas, false);
   // N&B
   if (cvReady) return bwCv(canvas, darkness);
-  return grayJs(canvas, true); // fallback : seuillage Otsu
+  return grayJs(canvas, false); // repli : gris simple si OpenCV non chargé
 }
 
+/* N&B "document" facon Genius : normalisation du fond par division
+   (papier -> blanc uniforme, ombres enlevees) + courbe de niveaux.
+   Garde les nuances de gris -> bords lisses, texte net, pas de bruit binaire. */
 function bwCv(canvas, darkness) {
   const src = cv.imread(canvas);
   const gray = new cv.Mat();
   cv.cvtColor(src, gray, cv.COLOR_RGBA2GRAY);
-  const dst = new cv.Mat();
-  // darkness 0 (clair) -> 100 (foncé) ; C élevé = plus clair.
-  // plancher à C=2 pour éviter que les aplats blancs ne s'inversent en noir.
+
+  // 1) estimation du fond (eclairage) : downscale -> gros flou -> upscale
+  const f = 0.125;
+  const sw = Math.max(1, Math.round(gray.cols * f));
+  const sh = Math.max(1, Math.round(gray.rows * f));
+  const small = new cv.Mat();
+  cv.resize(gray, small, new cv.Size(sw, sh), 0, 0, cv.INTER_AREA);
+  let k = Math.round(Math.max(sw, sh) / 6); if (k % 2 === 0) k++; if (k < 3) k = 3;
+  cv.GaussianBlur(small, small, new cv.Size(k, k), 0);
+  const bg = new cv.Mat();
+  cv.resize(small, bg, new cv.Size(gray.cols, gray.rows), 0, 0, cv.INTER_LINEAR);
+
+  // 2) division : le fond devient blanc, l'eclairage inegal disparait
+  const norm = new cv.Mat();
+  cv.divide(gray, bg, norm, 255);
+
+  // 3) niveaux/contraste selon darkness (on reste en gris -> bords lisses)
   const d = (typeof darkness === 'number') ? darkness : 50;
-  const block = 25, C = 22 - (d / 100) * 20;
-  cv.adaptiveThreshold(gray, dst, 255, cv.ADAPTIVE_THRESH_GAUSSIAN_C, cv.THRESH_BINARY, block, C);
+  const Wp = 238 - (d / 100) * 70;   // point blanc : 238 (clair) -> 168 (fonce)
+  const Bp = 55 - (d / 100) * 35;    // point noir  : 55  (clair) -> 20  (fonce)
+  const lut = new cv.Mat(1, 256, cv.CV_8U);
+  const ld = lut.data;
+  for (let i = 0; i < 256; i++) {
+    let v = (i - Bp) / (Wp - Bp);
+    v = v < 0 ? 0 : v > 1 ? 1 : v;
+    ld[i] = Math.round(v * 255);
+  }
+  const out8 = new cv.Mat();
+  cv.LUT(norm, lut, out8);
+
   const out = document.createElement('canvas');
   out.width = canvas.width; out.height = canvas.height;
-  cv.imshow(out, dst);
-  src.delete(); gray.delete(); dst.delete();
+  cv.imshow(out, out8);
+  src.delete(); gray.delete(); small.delete(); bg.delete(); norm.delete(); lut.delete(); out8.delete();
   return out;
 }
 
