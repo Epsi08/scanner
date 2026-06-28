@@ -908,6 +908,7 @@ let dragIndex = -1;
 let livePreview = localStorage.getItem('scanLivePreview') === '1';
 
 function openEditor(state) {
+  clearNormCache(editState);
   editState = state;
   if (typeof editState.darkness !== 'number') editState.darkness = 50;
   show('editor');
@@ -916,7 +917,15 @@ function openEditor(state) {
   renderEditorImage(true);
 }
 
-/* image affichée dans l'éditeur : brute, ou filtrée en direct si aperçu actif */
+/* libère le Mat de normalisation N&B mis en cache sur un editState */
+function clearNormCache(state) {
+  if (state && state._normMat) { state._normMat.delete(); state._normMat = null; }
+}
+
+/* image affichée dans l'éditeur : brute, ou filtrée en direct si aperçu actif.
+   Le N&B est coûteux : on cache la normalisation de fond (bwComputeNorm) par
+   rotation et on ne refait que la courbe de niveaux (bwApplyLevels) à chaque
+   geste du curseur de noirceur, sinon le slider rame. */
 function buildDisplayCanvas() {
   const rc = rotatedCanvas(editState.base, editState.rotation);
   if (!livePreview) return rc;
@@ -927,6 +936,15 @@ function buildDisplayCanvas() {
   pc.width = Math.round(rc.width * scale);
   pc.height = Math.round(rc.height * scale);
   pc.getContext('2d').drawImage(rc, 0, 0, pc.width, pc.height);
+
+  if (editState.filter === 'bw' && cvReady) {
+    if (!editState._normMat || editState._normRotation !== editState.rotation) {
+      clearNormCache(editState);
+      editState._normMat = bwComputeNorm(pc);
+      editState._normRotation = editState.rotation;
+    }
+    return bwApplyLevels(editState._normMat, pc.width, pc.height, editState.darkness);
+  }
   return applyFilter(pc, editState.filter, editState.darkness);
 }
 
@@ -1151,13 +1169,13 @@ $('livePreviewToggle').addEventListener('change', (e) => {
 });
 
 /* annuler / supprimer */
-$('editCancel').addEventListener('click', () => { editState = null; show('home'); refreshHome(); });
+$('editCancel').addEventListener('click', () => { clearNormCache(editState); editState = null; show('home'); refreshHome(); });
 $('deletePage').addEventListener('click', () => {
   if (editState.pageIndex !== null) {
     if (!confirm('Supprimer cette page ?')) return;
     pages.splice(editState.pageIndex, 1);
   }
-  editState = null; show('home'); refreshHome();
+  clearNormCache(editState); editState = null; show('home'); refreshHome();
 });
 
 /* valider */
@@ -1178,6 +1196,7 @@ $('editDone').addEventListener('click', async () => {
     let idx;
     if (editState.pageIndex !== null) { idx = editState.pageIndex; pages[idx] = pageData; }
     else { pages.push(pageData); idx = pages.length - 1; }
+    clearNormCache(editState);
     editState = null;
     hideLoader();
     refreshHome();
@@ -1259,17 +1278,14 @@ function applyFilter(canvas, filter, darkness) {
   return grayJs(canvas, false); // repli : gris simple si OpenCV non chargé
 }
 
-/* N&B "document" facon Genius : normalisation du fond par division
-   (papier -> blanc uniforme, ombres enlevees) + courbe de niveaux.
-   Garde les nuances de gris -> bords lisses, texte net, pas de bruit binaire. */
-function bwCv(canvas, darkness) {
+/* Étape LOURDE (à ne calculer qu'une fois par image) : normalisation du fond
+   par division -> papier blanc uniforme, ombres/éclairage inégal effacés.
+   Renvoie un cv.Mat à libérer par l'appelant. */
+function bwComputeNorm(canvas) {
   const src = cv.imread(canvas);
   const gray = new cv.Mat();
   cv.cvtColor(src, gray, cv.COLOR_RGBA2GRAY);
 
-  // 1) estimation du fond papier : fermeture morpho (le max local remplit le
-  //    texte sombre par le papier alentour) a resolution elevee pour conserver
-  //    le vrai blanc entre les lignes, puis flou pour lisser.
   const maxBg = 1400;
   const scale = Math.min(1, maxBg / Math.max(gray.cols, gray.rows));
   const sw = Math.max(1, Math.round(gray.cols * scale));
@@ -1284,16 +1300,19 @@ function bwCv(canvas, darkness) {
   const bg = new cv.Mat();
   if (scale < 1) cv.resize(work, bg, new cv.Size(gray.cols, gray.rows), 0, 0, cv.INTER_LINEAR);
   else work.copyTo(bg);
-  work.delete();
+  work.delete(); kernel.delete();
 
-  // 2) division : le fond devient blanc, l'eclairage inegal disparait
   const norm = new cv.Mat();
   cv.divide(gray, bg, norm, 255);
+  src.delete(); gray.delete(); bg.delete();
+  return norm;
+}
 
-  // 3) niveaux : point noir remonte pour que le texte gris devienne franc,
-  //    point blanc haut pour garder le papier blanc. darkness regle l'intensite.
+/* Étape LÉGÈRE (recalculée à chaque geste du curseur) : courbe de niveaux
+   pilotée par darkness + léger renforcement de netteté. */
+function bwApplyLevels(normMat, outWidth, outHeight, darkness) {
   const d = (typeof darkness === 'number') ? darkness : 50;
-  const Bp = 90 + (d / 100) * 90;    // point noir : 90 (clair) -> 180 (tres fonce)
+  const Bp = 90 + (d / 100) * 90;    // point noir : 90 (clair) -> 180 (très foncé)
   const Wp = 245 - (d / 100) * 15;   // point blanc : 245 -> 230 (papier blanc)
   const lut = new cv.Mat(1, 256, cv.CV_8U);
   const ld = lut.data;
@@ -1303,19 +1322,25 @@ function bwCv(canvas, darkness) {
     ld[i] = Math.round(v * 255);
   }
   const out8 = new cv.Mat();
-  cv.LUT(norm, lut, out8);
+  cv.LUT(normMat, lut, out8);
 
-  // 4) léger renforcement de netteté (unsharp mask) pour un texte plus franc
   const blurS = new cv.Mat();
   cv.GaussianBlur(out8, blurS, new cv.Size(0, 0), 1.2);
   const sharp = new cv.Mat();
   cv.addWeighted(out8, 1.4, blurS, -0.4, 0, sharp);
 
   const out = document.createElement('canvas');
-  out.width = canvas.width; out.height = canvas.height;
+  out.width = outWidth; out.height = outHeight;
   cv.imshow(out, sharp);
-  src.delete(); gray.delete(); bg.delete(); norm.delete(); lut.delete(); out8.delete();
-  blurS.delete(); sharp.delete(); kernel.delete();
+  lut.delete(); out8.delete(); blurS.delete(); sharp.delete();
+  return out;
+}
+
+/* N&B "document" facon Genius : combine les deux étapes (rendu final, one-shot). */
+function bwCv(canvas, darkness) {
+  const norm = bwComputeNorm(canvas);
+  const out = bwApplyLevels(norm, canvas.width, canvas.height, darkness);
+  norm.delete();
   return out;
 }
 
