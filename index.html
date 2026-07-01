@@ -1414,7 +1414,7 @@ function openExportSheet() {
 function dateStamp() {
   const d = new Date();
   const p = n => String(n).padStart(2, '0');
-  return `${d.getFullYear()}-${p(d.getMonth() + 1)}-${p(d.getDate())}`;
+  return `${p(d.getDate())}-${p(d.getMonth() + 1)}-${d.getFullYear()}_${p(d.getHours())}h${p(d.getMinutes())}`;
 }
 
 async function exportPDF() {
