@@ -1312,8 +1312,8 @@ function bwComputeNorm(canvas) {
    pilotée par darkness + léger renforcement de netteté. */
 function bwApplyLevels(normMat, outWidth, outHeight, darkness) {
   const d = (typeof darkness === 'number') ? darkness : 50;
-  const Bp = 90 + (d / 100) * 90;    // point noir : 90 (clair) -> 180 (très foncé)
-  const Wp = 245 - (d / 100) * 15;   // point blanc : 245 -> 230 (papier blanc)
+  const Bp = 75 + (d / 100) * 100;   // point noir : 75 -> 175
+  const Wp = 215 - (d / 100) * 25;   // point blanc : 215 -> 190 (fond forcé blanc)
   const lut = new cv.Mat(1, 256, cv.CV_8U);
   const ld = lut.data;
   for (let i = 0; i < 256; i++) {
@@ -1325,9 +1325,9 @@ function bwApplyLevels(normMat, outWidth, outHeight, darkness) {
   cv.LUT(normMat, lut, out8);
 
   const blurS = new cv.Mat();
-  cv.GaussianBlur(out8, blurS, new cv.Size(0, 0), 1.2);
+  cv.GaussianBlur(out8, blurS, new cv.Size(0, 0), 0.8);
   const sharp = new cv.Mat();
-  cv.addWeighted(out8, 1.4, blurS, -0.4, 0, sharp);
+  cv.addWeighted(out8, 1.6, blurS, -0.6, 0, sharp);
 
   const out = document.createElement('canvas');
   out.width = outWidth; out.height = outHeight;
