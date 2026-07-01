@@ -121,7 +121,7 @@
 
   /* FAB scanner (état vide) */
   .fab {
-    position: fixed; bottom: calc(var(--safe-bottom) + 24px); left: 24px;
+    position: fixed; bottom: calc(var(--safe-bottom) + 24px); left: 50%; transform: translateX(-50%);
     width: 60px; height: 60px; border-radius: 50%;
     background: var(--accent); color: #fff;
     display: flex; align-items: center; justify-content: center;
@@ -1452,7 +1452,7 @@ async function exportJPG() {
     }
     if (navigator.canShare && navigator.canShare({ files })) {
       hideLoader();
-      await navigator.share({ files, title: 'Scan' });
+      await navigator.share({ files });
     } else {
       // pas de partage multi-fichiers : on télécharge chacun
       hideLoader();
@@ -1468,7 +1468,7 @@ async function exportJPG() {
 async function shareOrDownload(blob, name, type) {
   const file = new File([blob], name, { type });
   if (navigator.canShare && navigator.canShare({ files: [file] })) {
-    try { await navigator.share({ files: [file], title: name }); return; }
+    try { await navigator.share({ files: [file] }); return; }
     catch (err) { if (err && err.name === 'AbortError') return; }
   }
   downloadFile(blob, name);
