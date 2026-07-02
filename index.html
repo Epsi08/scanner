@@ -399,7 +399,6 @@
 
   <div class="filters" id="filters">
     <button class="chip active" data-filter="bw"><div class="swatch">N&amp;B</div>Noir &amp; blanc</button>
-    <button class="chip" data-filter="gray"><div class="swatch">Gris</div>Gris</button>
     <button class="chip" data-filter="color"><div class="swatch">Coul.</div>Couleur</button>
   </div>
 
@@ -638,9 +637,10 @@ $('libraryInput').addEventListener('change', (e) => processImageFile(e.target.fi
    CAMÉRA LIVE — détection du document en temps réel + capture
    ============================================================ */
 let camStream = null, camRAF = null;
-let camLastQuad = null;        // dernier quad détecté (espace canvas de détection)
+let camLastQuad = null;        // dernier quad lissé (espace canvas de détection)
 let camDetScale = 1;          // facteur canvas détection -> pixels vidéo
-let camLastDetTime = 0;
+let camFrameCount = 0;        // compteur de frames rAF pour le skip
+let camQuadHistory = [];      // historique des N derniers quads détectés (lissage)
 const camDet = document.createElement('canvas');
 
 async function startLiveCamera() {
@@ -661,6 +661,8 @@ async function startLiveCamera() {
   const v = $('camVideo');
   v.srcObject = camStream;
   camLastQuad = null;
+  camQuadHistory = [];
+  camFrameCount = 0;
   show('camera');
   $('camHint').textContent = 'Recherche du document…';
   $('camHint').classList.remove('locked');
@@ -685,17 +687,30 @@ function videoDisplayRect() {
   return { offX: (cw - dispW) / 2, offY: (ch - dispH) / 2, scaleFromVideo: dispW / vw };
 }
 
+function smoothQuad(history) {
+  if (history.length <= 1) return history[0] || null;
+  return history[0].map((_, i) => ({
+    x: history.reduce((s, q) => s + q[i].x, 0) / history.length,
+    y: history.reduce((s, q) => s + q[i].y, 0) / history.length,
+  }));
+}
+
 function camLoop() {
   if (!camStream) return;
   const v = $('camVideo');
-  const now = performance.now();
-  if (cvReady && v.videoWidth && now - camLastDetTime > 140) {
-    camLastDetTime = now;
-    const detW = 360, detH = Math.round(detW * v.videoHeight / v.videoWidth);
+  camFrameCount++;
+  if (cvReady && v.videoWidth && camFrameCount % 4 === 0) {
+    const detW = 480, detH = Math.round(detW * v.videoHeight / v.videoWidth);
     camDet.width = detW; camDet.height = detH;
     camDet.getContext('2d').drawImage(v, 0, 0, detW, detH);
-    camLastQuad = detectQuad(camDet);   // peut être null
     camDetScale = v.videoWidth / detW;
+    const q = detectQuad(camDet);
+    if (q) {
+      camQuadHistory.push(q);
+      if (camQuadHistory.length > 5) camQuadHistory.shift();
+      camLastQuad = smoothQuad(camQuadHistory);
+    }
+    // si rien détecté : on garde camLastQuad (dernier cadre valide)
   }
   drawCamOverlay();
   camRAF = requestAnimationFrame(camLoop);
@@ -841,48 +856,81 @@ function quadFromContour(cnt) {
   }));
 }
 
-/* renvoie le quadrilatère détecté (ordonné TL,TR,BR,BL) ou null si rien de fiable */
+/* renvoie le quadrilatère détecté (ordonné TL,TR,BR,BL) ou null si rien de fiable.
+   Méthode A (prioritaire) : Otsu + fermeture morphologique pour feuille claire sur fond sombre.
+   Méthode B (secours)     : Canny à seuils adaptatifs calculés depuis la médiane des pixels. */
 function detectQuad(canvas) {
   if (!cvReady) return null;
   const W = canvas.width, H = canvas.height;
-  const minArea = W * H * 0.12;     // au moins 12% de l'image
-  const maxArea = W * H * 0.997;    // pas le bord de l'image entière
+  const minArea = W * H * 0.20;
+  const maxArea = W * H * 0.997;
   const trash = [];
   const M = (m) => { trash.push(m); return m; };
+
+  /* extrait le meilleur quad 4-sommets convexe depuis un masque binaire */
+  function bestQuadFromMask(mask) {
+    const contours = new cv.MatVector();
+    const hier = M(new cv.Mat());
+    cv.findContours(mask, contours, hier, cv.RETR_EXTERNAL, cv.CHAIN_APPROX_SIMPLE);
+    let best = null, bestA = minArea;
+    for (let i = 0; i < contours.size(); i++) {
+      const cnt = contours.get(i);
+      const area = Math.abs(cv.contourArea(cnt));
+      if (area > bestA && area < maxArea) {
+        const peri = cv.arcLength(cnt, true);
+        const approx = new cv.Mat();
+        cv.approxPolyDP(cnt, approx, 0.02 * peri, true);
+        if (approx.rows === 4 && cv.isContourConvex(approx)) {
+          const pts = [];
+          for (let j = 0; j < 4; j++)
+            pts.push({ x: approx.data32S[j * 2], y: approx.data32S[j * 2 + 1] });
+          const qa = polyArea(pts);
+          if (qa > bestA && qa < maxArea) { best = pts; bestA = qa; }
+        }
+        approx.delete();
+      }
+      cnt.delete();
+    }
+    contours.delete();
+    return best;
+  }
+
   try {
     const src = M(cv.imread(canvas));
-    const gray = M(new cv.Mat()); cv.cvtColor(src, gray, cv.COLOR_RGBA2GRAY);
+    const gray = M(new cv.Mat());
+    cv.cvtColor(src, gray, cv.COLOR_RGBA2GRAY);
     cv.GaussianBlur(gray, gray, new cv.Size(5, 5), 0);
 
-    // plusieurs masques : contours (Canny) + seuillage Otsu dans les 2 sens
-    const masks = [];
-    const edges = M(new cv.Mat()); cv.Canny(gray, edges, 50, 150);
-    const kk = M(cv.Mat.ones(5, 5, cv.CV_8U)); cv.dilate(edges, edges, kk); masks.push(edges);
-    const th = M(new cv.Mat()); cv.threshold(gray, th, 0, 255, cv.THRESH_BINARY + cv.THRESH_OTSU); masks.push(th);
-    const thi = M(new cv.Mat()); cv.threshold(gray, thi, 0, 255, cv.THRESH_BINARY_INV + cv.THRESH_OTSU); masks.push(thi);
+    // Méthode A : Otsu + fermeture 7×7 (bouche les trous dus au texte / QR codes)
+    const thA = M(new cv.Mat());
+    cv.threshold(gray, thA, 0, 255, cv.THRESH_BINARY + cv.THRESH_OTSU);
+    const kA = M(cv.Mat.ones(7, 7, cv.CV_8U));
+    const closedA = M(new cv.Mat());
+    cv.morphologyEx(thA, closedA, cv.MORPH_CLOSE, kA);
+    let best = bestQuadFromMask(closedA);
 
-    let best = null, bestArea = minArea;
-    for (const mask of masks) {
-      const contours = new cv.MatVector(); const hier = M(new cv.Mat());
-      cv.findContours(mask, contours, hier, cv.RETR_EXTERNAL, cv.CHAIN_APPROX_SIMPLE);
-      for (let i = 0; i < contours.size(); i++) {
-        const cnt = contours.get(i);
-        const area = Math.abs(cv.contourArea(cnt));
-        if (area > bestArea && area < maxArea) {
-          const q = quadFromContour(cnt);
-          const qa = polyArea(q);
-          if (qa > bestArea && qa < maxArea) { best = q; bestArea = qa; }
-        }
-        cnt.delete();
-      }
-      contours.delete();
+    // Méthode B : Canny à seuils adaptatifs (médiane pixels)
+    if (!best) {
+      const data = gray.data;
+      const step = Math.max(1, Math.floor(data.length / 1000));
+      const sample = [];
+      for (let i = 0; i < data.length; i += step) sample.push(data[i]);
+      sample.sort((a, b) => a - b);
+      const med = sample[Math.floor(sample.length / 2)];
+      const lo = Math.max(0, 0.66 * med), hi = Math.min(255, 1.33 * med);
+      const edges = M(new cv.Mat());
+      cv.Canny(gray, edges, lo, hi);
+      const kB = M(cv.Mat.ones(5, 5, cv.CV_8U));
+      cv.dilate(edges, edges, kB);
+      best = bestQuadFromMask(edges);
     }
+
     return best ? orderCorners(best) : null;
   } catch (err) {
     console.warn('Détection échouée', err);
     return null;
   } finally {
-    trash.forEach((t) => t && t.delete());
+    trash.forEach((t) => { try { if (t) t.delete(); } catch (_) {} });
   }
 }
 
@@ -1272,10 +1320,9 @@ function warpFallback(canvas, c, outW, outH) {
    ============================================================ */
 function applyFilter(canvas, filter, darkness) {
   if (filter === 'color') return canvas;
-  if (filter === 'gray') return grayJs(canvas, false);
-  // N&B
+  // N&B (défaut)
   if (cvReady) return bwCv(canvas, darkness);
-  return grayJs(canvas, false); // repli : gris simple si OpenCV non chargé
+  return grayJs(canvas, false); // repli si OpenCV non chargé
 }
 
 /* Étape LOURDE (à ne calculer qu'une fois par image) : normalisation du fond
@@ -1435,7 +1482,8 @@ async function exportPDF() {
     });
     const name = `Scan_${dateStamp()}.pdf`;
     const blob = pdf.output('blob');
-    await shareOrDownload(blob, name, 'application/pdf');
+    const shared = await shareOrDownload(blob, name, 'application/pdf');
+    if (shared) { show('home'); refreshHome(); }
   } catch (err) {
     console.error(err); toast('Erreur PDF.');
   } finally { hideLoader(); }
@@ -1453,11 +1501,13 @@ async function exportJPG() {
     if (navigator.canShare && navigator.canShare({ files })) {
       hideLoader();
       await navigator.share({ files });
+      show('home'); refreshHome();
     } else {
       // pas de partage multi-fichiers : on télécharge chacun
       hideLoader();
       files.forEach(f => downloadFile(f, f.name));
       toast('Images téléchargées.');
+      show('home'); refreshHome();
     }
   } catch (err) {
     if (err && err.name === 'AbortError') { hideLoader(); return; }
@@ -1465,14 +1515,16 @@ async function exportJPG() {
   }
 }
 
+/* Retourne true si le fichier a été partagé/téléchargé, false si l'utilisateur a annulé. */
 async function shareOrDownload(blob, name, type) {
   const file = new File([blob], name, { type });
   if (navigator.canShare && navigator.canShare({ files: [file] })) {
-    try { await navigator.share({ files: [file] }); return; }
-    catch (err) { if (err && err.name === 'AbortError') return; }
+    try { await navigator.share({ files: [file] }); return true; }
+    catch (err) { if (err && err.name === 'AbortError') return false; }
   }
   downloadFile(blob, name);
   toast('Fichier téléchargé.');
+  return true;
 }
 
 function downloadFile(blob, name) {
