@@ -489,19 +489,24 @@ let editState = null;      // état de l'éditeur en cours
 
 const $ = (id) => document.getElementById(id);
 
-/* OpenCV chargé en différé (gros fichier ~8 Mo) */
-function loadOpenCV() {
+/* OpenCV chargé en différé (gros fichier ~10 Mo).
+   Copie locale versionnée avec l'app (docs.opencv.org/4.x est un fichier
+   mouvant qui peut casser l'app à distance) ; repli CDN si absente. */
+function loadOpenCV(src, fallback) {
   const s = document.createElement('script');
-  s.src = 'https://docs.opencv.org/4.x/opencv.js';
+  s.src = src;
   s.async = true;
   s.onload = () => {
     if (window.cv && cv.getBuildInformation) { cvReady = true; }
     else if (window.cv) { cv['onRuntimeInitialized'] = () => { cvReady = true; }; }
   };
-  s.onerror = () => console.warn('OpenCV non chargé — mode dégradé');
+  s.onerror = () => {
+    if (fallback) { console.warn('OpenCV local absent, repli CDN'); loadOpenCV(fallback, null); }
+    else console.warn('OpenCV non chargé — mode dégradé');
+  };
   document.body.appendChild(s);
 }
-loadOpenCV();
+loadOpenCV('opencv.js', 'https://docs.opencv.org/4.x/opencv.js');
 
 /* ============================================================
    Helpers UI
@@ -641,6 +646,8 @@ let camLastQuad = null;        // dernier quad lissé (espace canvas de détecti
 let camDetScale = 1;          // facteur canvas détection -> pixels vidéo
 let camFrameCount = 0;        // compteur de frames rAF pour le skip
 let camQuadHistory = [];      // historique des N derniers quads détectés (lissage)
+let camLastHitTime = 0;       // dernière détection réussie (expiration du cadre)
+const CAM_QUAD_TTL = 1500;    // ms sans détection avant de retirer le cadre
 const camDet = document.createElement('canvas');
 
 async function startLiveCamera() {
@@ -663,6 +670,7 @@ async function startLiveCamera() {
   camLastQuad = null;
   camQuadHistory = [];
   camFrameCount = 0;
+  camLastHitTime = 0;
   show('camera');
   $('camHint').textContent = 'Recherche du document…';
   $('camHint').classList.remove('locked');
@@ -709,8 +717,13 @@ function camLoop() {
       camQuadHistory.push(q);
       if (camQuadHistory.length > 5) camQuadHistory.shift();
       camLastQuad = smoothQuad(camQuadHistory);
+      camLastHitTime = performance.now();
+    } else if (camLastQuad && performance.now() - camLastHitTime > CAM_QUAD_TTL) {
+      // plus rien depuis un moment : le cadre ne correspond plus à la scène
+      camLastQuad = null;
+      camQuadHistory = [];
     }
-    // si rien détecté : on garde camLastQuad (dernier cadre valide)
+    // sinon : on garde le dernier cadre valide (stabilité entre deux frames)
   }
   drawCamOverlay();
   camRAF = requestAnimationFrame(camLoop);
@@ -863,7 +876,7 @@ function detectQuad(canvas) {
   if (!cvReady) return null;
   const W = canvas.width, H = canvas.height;
   const minArea = W * H * 0.20;
-  const maxArea = W * H * 0.997;
+  const maxArea = W * H * 0.95;   // rejette le fond entier pris pour un document
   const trash = [];
   const M = (m) => { trash.push(m); return m; };
 
@@ -902,12 +915,21 @@ function detectQuad(canvas) {
     cv.GaussianBlur(gray, gray, new cv.Size(5, 5), 0);
 
     // Méthode A : Otsu + fermeture 7×7 (bouche les trous dus au texte / QR codes)
+    const kA = M(cv.Mat.ones(7, 7, cv.CV_8U));
     const thA = M(new cv.Mat());
     cv.threshold(gray, thA, 0, 255, cv.THRESH_BINARY + cv.THRESH_OTSU);
-    const kA = M(cv.Mat.ones(7, 7, cv.CV_8U));
     const closedA = M(new cv.Mat());
     cv.morphologyEx(thA, closedA, cv.MORPH_CLOSE, kA);
     let best = bestQuadFromMask(closedA);
+
+    // Méthode A-bis : polarité inverse (document sombre sur fond clair)
+    if (!best) {
+      const thAi = M(new cv.Mat());
+      cv.threshold(gray, thAi, 0, 255, cv.THRESH_BINARY_INV + cv.THRESH_OTSU);
+      const closedAi = M(new cv.Mat());
+      cv.morphologyEx(thAi, closedAi, cv.MORPH_CLOSE, kA);
+      best = bestQuadFromMask(closedAi);
+    }
 
     // Méthode B : Canny à seuils adaptatifs (médiane pixels)
     if (!best) {
