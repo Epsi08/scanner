@@ -623,7 +623,7 @@ async function processImageFile(file) {
   showLoader('Lecture de la photo…');
   try {
     const bmp = await loadBitmap(file);
-    const baseCanvas = bitmapToCanvas(bmp, 2000);
+    const baseCanvas = bitmapToCanvas(bmp, 2400);
     showLoader('Détection des bords…');
     const corners = detectCorners(baseCanvas);
     openEditor({ base: baseCanvas, corners, rotation: 0, filter: 'bw', darkness: 58, pageIndex: null });
@@ -776,7 +776,7 @@ $('camShoot').addEventListener('click', () => {
   const detScale = camDetScale;
   stopCamera();
   showLoader('Détection des bords…');
-  const base = bitmapToCanvas(full, 2000);
+  const base = bitmapToCanvas(full, 2400);
   let corners;
   if (liveQuad) {
     // le live avait accroché : on réutilise ce que l'utilisateur a vu
@@ -1354,6 +1354,9 @@ function bwComputeNorm(canvas) {
   const src = cv.imread(canvas);
   const gray = new cv.Mat();
   cv.cvtColor(src, gray, cv.COLOR_RGBA2GRAY);
+  // débruitage : supprime le grain du papier/capteur -> fond lisse façon Genius,
+  // en préservant les bords du texte (médian 3, sans étaler les fins traits).
+  cv.medianBlur(gray, gray, 3);
 
   const maxBg = 1400;
   const scale = Math.min(1, maxBg / Math.max(gray.cols, gray.rows));
@@ -1499,7 +1502,7 @@ async function exportPDF() {
       const ratio = Math.min(maxW / c.width, maxH / c.height);
       const w = c.width * ratio, h = c.height * ratio;
       const x = (pageW - w) / 2, y = (pageH - h) / 2;
-      const data = c.toDataURL('image/jpeg', 0.85);
+      const data = c.toDataURL('image/jpeg', 0.92);
       pdf.addImage(data, 'JPEG', x, y, w, h);
     });
     const name = `Scan_${dateStamp()}.pdf`;
