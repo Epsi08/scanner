@@ -247,6 +247,11 @@
   .cam-top .iconbtn { color: #fff; background: rgba(255,255,255,.15); }
   .cam-hint { color: #fff; font-size: 14px; font-weight: 500; }
   .cam-hint.locked { color: #34C759; }
+  .cam-res {
+    margin-left: auto; color: #fff; font-size: 12px; font-weight: 600;
+    background: rgba(255,255,255,.15); padding: 3px 9px; border-radius: 10px;
+  }
+  .cam-res:empty { display: none; }
   .cam-bottom {
     position: absolute; left: 0; right: 0; bottom: 0;
     padding-bottom: calc(var(--safe-bottom) + 28px); padding-top: 20px;
@@ -285,8 +290,8 @@
   .sheet .sub b { color: var(--accent); }
   .format-row { display: flex; gap: 12px; margin-bottom: 12px; }
   .format-row button {
-    flex: 1; background: var(--card); border-radius: var(--radius);
-    padding: 16px 8px; display: flex; flex-direction: column; align-items: center; gap: 6px;
+    flex: 1; min-width: 0; background: var(--card); border-radius: var(--radius);
+    padding: 16px 6px; display: flex; flex-direction: column; align-items: center; gap: 6px;
     font-size: 14px; font-weight: 600; box-shadow: 0 1px 3px rgba(0,0,0,.06);
   }
   .format-row button svg { width: 28px; height: 28px; color: var(--accent); }
@@ -464,6 +469,7 @@
       <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M18 6 6 18M6 6l12 12"/></svg>
     </button>
     <span id="camHint" class="cam-hint">Recherche du document…</span>
+    <span id="camRes" class="cam-res"></span>
   </div>
   <div class="cam-bottom">
     <button id="camShoot" class="shutter" aria-label="Capturer"><span></span></button>
@@ -478,14 +484,17 @@
 <div class="loader hidden" id="loader"><div class="spinner"></div><span id="loaderText">Traitement…</span></div>
 
 <!-- libs -->
-<script src="https://cdnjs.cloudflare.com/ajax/libs/jspdf/2.5.1/jspdf.umd.min.js"></script>
+<script src="jspdf.umd.min.js"></script>
 <script>
 /* ============================================================
    État global
    ============================================================ */
 let cvReady = false;
-const pages = [];          // { canvas (rendu final), thumb (dataURL) }
+let cvFailed = false;      // OpenCV introuvable (local + CDN) : mode dégradé
+const pages = [];          // { baseBlob, blob (JPEG final), url, thumb, w, h, corners, rotation, filter, darkness }
 let editState = null;      // état de l'éditeur en cours
+const MAX_SIDE = 3200;     // résolution max conservée (≈ 230 dpi sur un A4 plein cadre)
+const DETECT_SIDE = 800;   // la détection des coins tourne sur une copie réduite
 
 const $ = (id) => document.getElementById(id);
 
@@ -502,11 +511,55 @@ function loadOpenCV(src, fallback) {
   };
   s.onerror = () => {
     if (fallback) { console.warn('OpenCV local absent, repli CDN'); loadOpenCV(fallback, null); }
-    else console.warn('OpenCV non chargé — mode dégradé');
+    else { cvFailed = true; console.warn('OpenCV non chargé — mode dégradé'); }
   };
   document.body.appendChild(s);
 }
 loadOpenCV('opencv.js', 'https://docs.opencv.org/4.x/opencv.js');
+
+/* attend le moteur OpenCV (sinon le scan serait dégradé sans prévenir) */
+function whenCvReady(timeoutMs = 30000) {
+  if (cvReady) return Promise.resolve(true);
+  return new Promise(resolve => {
+    const t0 = Date.now();
+    const tick = () => {
+      if (cvReady) resolve(true);
+      else if (cvFailed || Date.now() - t0 > timeoutMs) resolve(false);
+      else setTimeout(tick, 150);
+    };
+    tick();
+  });
+}
+async function ensureCv(msgAfter) {
+  if (cvReady) return true;
+  showLoader('Chargement du moteur de scan…');
+  const ok = await whenCvReady();
+  if (!ok) toast('Moteur de scan indisponible : qualité réduite.');
+  if (msgAfter) showLoader(msgAfter);
+  return ok;
+}
+
+/* libère tout de suite la mémoire d'un canvas (Safari iOS la rend tard sinon) */
+function releaseCanvas(c) { if (c) { c.width = 0; c.height = 0; } }
+function freeBitmap(b) {
+  if (!b) return;
+  if (b.close) b.close();
+  else if (b.src && b.src.startsWith('blob:')) URL.revokeObjectURL(b.src);
+}
+function canvasToBlob(c, q) {
+  return new Promise((res, rej) => c.toBlob(b => b ? res(b) : rej(new Error('toBlob')), 'image/jpeg', q));
+}
+/* vraie miniature (480 px) pour la galerie, pas l'image pleine résolution */
+function makeThumb(c) {
+  const s = Math.min(1, 480 / c.width);
+  const t = document.createElement('canvas');
+  t.width = Math.round(c.width * s); t.height = Math.round(c.height * s);
+  t.getContext('2d').drawImage(c, 0, 0, t.width, t.height);
+  const url = t.toDataURL('image/jpeg', 0.75);
+  releaseCanvas(t);
+  return url;
+}
+function freePage(p) { if (p && p.url) URL.revokeObjectURL(p.url); }
 
 /* ============================================================
    Helpers UI
@@ -533,7 +586,7 @@ function openPageViewer(i) {
   viewerIndex = i;
   show('viewer');
   $('viewerTitle').textContent = `Page ${i + 1} sur ${pages.length}`;
-  $('viewerImg').src = pages[i].canvas.toDataURL('image/jpeg', 0.92);
+  $('viewerImg').src = pages[i].url;   // JPEG déjà encodé : pas de recompression
   $('viewerPrev').classList.toggle('hidden', i === 0);
   $('viewerNext').classList.toggle('hidden', i === pages.length - 1);
 }
@@ -544,6 +597,7 @@ $('viewerEdit').addEventListener('click', () => openEditorForPage(viewerIndex));
 $('viewerExport').addEventListener('click', () => openExportSheet());
 $('viewerDelete').addEventListener('click', () => {
   if (!confirm('Supprimer cette page ?')) return;
+  freePage(pages[viewerIndex]);
   pages.splice(viewerIndex, 1);
   if (pages.length === 0) { show('home'); refreshHome(); }
   else openPageViewer(Math.min(viewerIndex, pages.length - 1));
@@ -578,7 +632,7 @@ $('fabScan').addEventListener('click', () => openSourceSheet());
 $('addPagesBtn').addEventListener('click', () => openSourceSheet());
 $('newDocBtn').addEventListener('click', () => {
   if (pages.length && !confirm('Démarrer un nouveau document ? Les pages actuelles seront supprimées (pense à exporter avant).')) return;
-  pages.length = 0; refreshHome();
+  pages.forEach(freePage); pages.length = 0; refreshHome();
 });
 
 /* feuille de choix : appareil photo ou photothèque */
@@ -591,10 +645,15 @@ function openSourceSheet() {
       <h3>Nouvelle page</h3>
       <div class="sub">D'où vient l'image ?</div>
       <div class="format-row">
-        <button id="srcCamera">
+        <button id="srcScan">
+          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M3 7V5a2 2 0 0 1 2-2h2"/><path d="M17 3h2a2 2 0 0 1 2 2v2"/><path d="M21 17v2a2 2 0 0 1-2 2h-2"/><path d="M7 21H5a2 2 0 0 1-2-2v-2"/><circle cx="12" cy="12" r="3.5"/></svg>
+          Scanner
+          <span class="hint">Détection live</span>
+        </button>
+        <button id="srcPhotoHD">
           <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M14.5 4h-5L7 7H4a2 2 0 0 0-2 2v9a2 2 0 0 0 2 2h16a2 2 0 0 0 2-2V9a2 2 0 0 0-2-2h-3l-2.5-3z"/><circle cx="12" cy="13" r="3.5"/></svg>
-          Appareil photo
-          <span class="hint">Prendre une photo</span>
+          Photo HD
+          <span class="hint">Qualité max</span>
         </button>
         <button id="srcLibrary">
           <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="3" y="3" width="18" height="18" rx="2"/><circle cx="9" cy="9" r="2"/><path d="m21 15-5-5L5 21"/></svg>
@@ -607,7 +666,9 @@ function openSourceSheet() {
   bd.addEventListener('click', () => bd.remove());
   document.body.appendChild(bd);
   $('srcCancel').addEventListener('click', () => bd.remove());
-  $('srcCamera').addEventListener('click', () => { bd.remove(); startLiveCamera(); });
+  $('srcScan').addEventListener('click', () => { bd.remove(); startLiveCamera(); });
+  // appareil photo natif : vraie photo 12 Mpx, détection des coins ensuite
+  $('srcPhotoHD').addEventListener('click', () => { bd.remove(); triggerInput('cameraInput'); });
   $('srcLibrary').addEventListener('click', () => { bd.remove(); triggerInput('libraryInput'); });
 }
 
@@ -623,7 +684,9 @@ async function processImageFile(file) {
   showLoader('Lecture de la photo…');
   try {
     const bmp = await loadBitmap(file);
-    const baseCanvas = bitmapToCanvas(bmp, 2400);
+    const baseCanvas = bitmapToCanvas(bmp, MAX_SIDE);
+    freeBitmap(bmp);
+    await ensureCv();
     showLoader('Détection des bords…');
     const corners = detectCorners(baseCanvas);
     openEditor({ base: baseCanvas, corners, rotation: 0, filter: 'bw', darkness: 58, pageIndex: null });
@@ -657,7 +720,8 @@ async function startLiveCamera() {
   }
   try {
     camStream = await navigator.mediaDevices.getUserMedia({
-      video: { facingMode: { ideal: 'environment' }, width: { ideal: 1920 }, height: { ideal: 1080 } },
+      // on demande le maximum (4K) : sans photo native, l'image capturée vient de ce flux
+      video: { facingMode: { ideal: 'environment' }, width: { ideal: 3840 }, height: { ideal: 2160 } },
       audio: false,
     });
   } catch (err) {
@@ -671,11 +735,18 @@ async function startLiveCamera() {
   camQuadHistory = [];
   camFrameCount = 0;
   camLastHitTime = 0;
+  $('camRes').textContent = '';
   show('camera');
   $('camHint').textContent = 'Recherche du document…';
   $('camHint').classList.remove('locked');
   try { await v.play(); } catch (_) {}
-  const begin = () => { resizeOverlay(); camLoop(); };
+  const begin = () => {
+    resizeOverlay();
+    // résolution réelle du flux : 8,3 MP = 4K ; 2,1 MP = limité au 1080p
+    const mp = v.videoWidth * v.videoHeight / 1e6;
+    $('camRes').textContent = mp ? mp.toFixed(1).replace('.', ',') + ' MP' : '';
+    camLoop();
+  };
   if (v.videoWidth) begin(); else v.onloadedmetadata = begin;
 }
 
@@ -766,31 +837,69 @@ function stopCamera() {
 
 $('camCancel').addEventListener('click', () => { stopCamera(); show('home'); refreshHome(); });
 
-$('camShoot').addEventListener('click', () => {
+let camShooting = false;
+$('camShoot').addEventListener('click', async () => {
   const v = $('camVideo');
-  if (!v.videoWidth) return;
-  const full = document.createElement('canvas');
-  full.width = v.videoWidth; full.height = v.videoHeight;
-  full.getContext('2d').drawImage(v, 0, 0);
+  if (!v.videoWidth || camShooting) return;
+  camShooting = true;
+  // image du flux (toujours dispo) + cadre live que l'utilisateur a vu
+  const frame = document.createElement('canvas');
+  frame.width = v.videoWidth; frame.height = v.videoHeight;
+  frame.getContext('2d').drawImage(v, 0, 0);
   const liveQuad = camLastQuad;
   const detScale = camDetScale;
-  stopCamera();
-  showLoader('Détection des bords…');
-  const base = bitmapToCanvas(full, 2400);
-  let corners;
-  if (liveQuad) {
-    // le live avait accroché : on réutilise ce que l'utilisateur a vu
-    const s = base.width / full.width;
-    corners = liveQuad.map(p => ({ x: p.x * detScale * s, y: p.y * detScale * s }));
-  } else {
-    // sinon : nouvelle détection sur l'image capturée (meilleure résolution)
-    corners = detectCorners(base); // renvoie le rectangle par défaut seulement si rien
+  showLoader('Capture…');
+  // vraie photo pleine résolution du capteur quand le navigateur le permet (Android)
+  let photo = null;
+  const track = camStream && camStream.getVideoTracks()[0];
+  if (track && 'ImageCapture' in window) {
+    try {
+      const blob = await new ImageCapture(track).takePhoto();
+      const bmp = await createImageBitmap(blob, { imageOrientation: 'from-image' });
+      photo = bitmapToCanvas(bmp, MAX_SIDE);
+      freeBitmap(bmp);
+    } catch (err) { console.warn('takePhoto indisponible, image du flux', err); }
   }
-  hideLoader();
-  openEditor({ base, corners, rotation: 0, filter: 'bw', darkness: 58, pageIndex: null });
+  stopCamera();
+  try {
+    await ensureCv();
+    showLoader('Détection des bords…');
+    let base, corners;
+    // la photo n'a pas forcément le cadrage du flux : on y refait la détection
+    const qPhoto = photo ? detectScaled(photo) : null;
+    if (qPhoto) {
+      base = photo; corners = qPhoto;
+    } else if (liveQuad) {
+      // le live avait accroché : on réutilise ce que l'utilisateur a vu
+      base = bitmapToCanvas(frame, MAX_SIDE);
+      const s = base.width / frame.width;
+      corners = liveQuad.map(p => ({ x: p.x * detScale * s, y: p.y * detScale * s }));
+    } else {
+      // rien d'accroché : meilleure image dispo + détection sur l'image figée
+      base = photo || bitmapToCanvas(frame, MAX_SIDE);
+      corners = detectCorners(base);
+    }
+    if (photo && base !== photo) releaseCanvas(photo);
+    releaseCanvas(frame);
+    hideLoader();
+    openEditor({ base, corners, rotation: 0, filter: 'bw', darkness: 58, pageIndex: null });
+  } catch (err) {
+    console.error(err); hideLoader(); toast('Erreur de capture.');
+    show('home'); refreshHome();
+  } finally {
+    camShooting = false;
+  }
 });
 
-window.addEventListener('resize', () => { if (camStream) resizeOverlay(); });
+let _relayoutTimer = null;
+window.addEventListener('resize', () => {
+  if (camStream) resizeOverlay();
+  // éditeur : l'image change de taille (rotation du téléphone…) -> on recale les poignées
+  if (editState && !$('editor').classList.contains('hidden')) {
+    clearTimeout(_relayoutTimer);
+    _relayoutTimer = setTimeout(() => { if (editState && dragIndex < 0) layoutEditor(); }, 150);
+  }
+});
 
 /* Charge un fichier image -> ImageBitmap avec orientation EXIF corrigée */
 async function loadBitmap(file) {
@@ -956,8 +1065,22 @@ function detectQuad(canvas) {
   }
 }
 
+/* détection sur une copie réduite (rapide, et les réglages de detectQuad sont
+   calibrés pour des images de quelques centaines de px), puis remise à l'échelle */
+function detectScaled(canvas) {
+  const s = Math.min(1, DETECT_SIDE / Math.max(canvas.width, canvas.height));
+  if (s === 1) return detectQuad(canvas);
+  const small = document.createElement('canvas');
+  small.width = Math.round(canvas.width * s); small.height = Math.round(canvas.height * s);
+  small.getContext('2d').drawImage(canvas, 0, 0, small.width, small.height);
+  const q = detectQuad(small);
+  const kx = canvas.width / small.width, ky = canvas.height / small.height;
+  releaseCanvas(small);
+  return q ? q.map(p => ({ x: p.x * kx, y: p.y * ky })) : null;
+}
+
 function detectCorners(canvas) {
-  return detectQuad(canvas) || fallbackRect(canvas.width, canvas.height);
+  return detectScaled(canvas) || fallbackRect(canvas.width, canvas.height);
 }
 
 /* ordonne les coins : TL, TR, BR, BL */
@@ -978,7 +1101,7 @@ let dragIndex = -1;
 let livePreview = localStorage.getItem('scanLivePreview') === '1';
 
 function openEditor(state) {
-  clearNormCache(editState);
+  closeEditor();
   editState = state;
   if (typeof editState.darkness !== 'number') editState.darkness = 50;
   show('editor');
@@ -992,20 +1115,41 @@ function clearNormCache(state) {
   if (state && state._normMat) { state._normMat.delete(); state._normMat = null; }
 }
 
+/* canvas source tourné, mis en cache par angle (évite une copie pleine
+   résolution à chaque affichage) */
+function editRotated(st) {
+  const deg = ((st.rotation % 360) + 360) % 360;
+  if (st._rc && st._rcDeg === deg) return st._rc;
+  if (st._rc && st._rc !== st.base) releaseCanvas(st._rc);
+  st._rc = rotatedCanvas(st.base, deg);
+  st._rcDeg = deg;
+  return st._rc;
+}
+
+/* ferme l'éditeur en libérant sa mémoire (Mat OpenCV + canvas pleine résolution) */
+function closeEditor() {
+  if (editState) {
+    clearNormCache(editState);
+    if (editState._rc && editState._rc !== editState.base) releaseCanvas(editState._rc);
+    releaseCanvas(editState.base);
+  }
+  editState = null;
+}
+
 /* image affichée dans l'éditeur : brute, ou filtrée en direct si aperçu actif.
    Le N&B est coûteux : on cache la normalisation de fond (bwComputeNorm) par
    rotation et on ne refait que la courbe de niveaux (bwApplyLevels) à chaque
    geste du curseur de noirceur, sinon le slider rame. */
 function buildDisplayCanvas() {
-  const rc = rotatedCanvas(editState.base, editState.rotation);
-  if (!livePreview) return rc;
-  // copie réduite pour la perf, puis filtre appliqué
-  const maxSide = 1100;
+  const rc = editRotated(editState);
+  // copie réduite pour l'affichage (la loupe, elle, lit la pleine résolution)
+  const maxSide = livePreview ? 1100 : 1800;
   const scale = Math.min(1, maxSide / Math.max(rc.width, rc.height));
   const pc = document.createElement('canvas');
   pc.width = Math.round(rc.width * scale);
   pc.height = Math.round(rc.height * scale);
   pc.getContext('2d').drawImage(rc, 0, 0, pc.width, pc.height);
+  if (!livePreview) return pc;
 
   if (editState.filter === 'bw' && cvReady) {
     if (!editState._normMat || editState._normRotation !== editState.rotation) {
@@ -1013,7 +1157,9 @@ function buildDisplayCanvas() {
       editState._normMat = bwComputeNorm(pc);
       editState._normRotation = editState.rotation;
     }
-    return bwApplyLevels(editState._normMat, pc.width, pc.height, editState.darkness);
+    const out = bwApplyLevels(editState._normMat, pc.width, pc.height, editState.darkness);
+    releaseCanvas(pc);
+    return out;
   }
   return applyFilter(pc, editState.filter, editState.darkness);
 }
@@ -1022,8 +1168,9 @@ let _previewPending = false;
 function renderEditorImage(relayout) {
   const img = $('editImg');
   const disp = buildDisplayCanvas();
-  img.onload = relayout ? (() => layoutEditor()) : null;
+  img.onload = relayout ? (() => { if (editState) layoutEditor(); }) : null;
   img.src = disp.toDataURL('image/jpeg', 0.85);
+  if (disp !== editState._rc && disp !== editState.base) releaseCanvas(disp);
 }
 function schedulePreview() {
   if (!livePreview || _previewPending) return;
@@ -1039,10 +1186,24 @@ function updateFilterUI() {
   $('darknessSlider').value = editState.darkness;
 }
 
-function openEditorForPage(i) {
-  // ré-édition : on repart de la source d'origine de la page si dispo
+async function openEditorForPage(i) {
+  // ré-édition : on repart de la photo source (gardée en JPEG, pas en canvas)
   const p = pages[i];
-  openEditor({ base: p.base, corners: p.corners, rotation: p.rotation, filter: p.filter, darkness: p.darkness, pageIndex: i });
+  if (!p) return;
+  showLoader('Ouverture…');
+  try {
+    const bmp = await createImageBitmap(p.baseBlob);
+    const base = bitmapToCanvas(bmp, MAX_SIDE);
+    freeBitmap(bmp);
+    openEditor({
+      base, baseBlob: p.baseBlob, corners: p.corners.map(q => ({ ...q })),
+      rotation: p.rotation, filter: p.filter, darkness: p.darkness, pageIndex: i,
+    });
+  } catch (err) {
+    console.error(err); toast('Impossible de rouvrir cette page.');
+  } finally {
+    hideLoader();
+  }
 }
 
 function rotatedCanvas(canvas, deg) {
@@ -1078,6 +1239,7 @@ function layoutEditor() {
   const wr = wrap.getBoundingClientRect();
   const ir = img.getBoundingClientRect();
   const dispW = ir.width, dispH = ir.height;
+  if (!dispW || !dispH) return;   // image pas encore à l'écran
   // le SVG est posé EXACTEMENT sur l'image
   svg.style.left = (ir.left - wr.left) + 'px';
   svg.style.top = (ir.top - wr.top) + 'px';
@@ -1086,12 +1248,11 @@ function layoutEditor() {
   svg.setAttribute('viewBox', `0 0 ${dispW} ${dispH}`);
 
   // canvas source affiché (après rotation) + facteur d'échelle
-  const rc = rotatedCanvas(editState.base, editState.rotation);
+  const rc = editRotated(editState);
   const sx = dispW / rc.width, sy = dispH / rc.height;
   const cornersRot = rotateCorners(editState.corners, editState.base.width, editState.base.height, editState.rotation);
   editState._disp = cornersRot.map(p => ({ x: p.x * sx, y: p.y * sy }));
   editState._scale = { sx, sy, srcW: rc.width, srcH: rc.height, dispW, dispH };
-  editState._rc = rc;
   drawEditor();
 }
 
@@ -1159,7 +1320,7 @@ function nearestCorner(pos) {
   return idx;
 }
 function startDrag(e) {
-  if (!editState) return;
+  if (!editState || !editState._disp) return;
   const pos = pointerPos(e);
   dragIndex = nearestCorner(pos);
   if (dragIndex >= 0) {
@@ -1200,16 +1361,10 @@ window.addEventListener('mouseup', endDrag);
 $('rotL').addEventListener('click', () => { editState.rotation -= 90; reopenEditorImg(); });
 $('rotR').addEventListener('click', () => { editState.rotation += 90; reopenEditorImg(); });
 $('resetCorners').addEventListener('click', () => {
-  const rc = rotatedCanvas(editState.base, editState.rotation);
-  const m = 0.04;
-  editState._disp = [
-    { x: rc.width * m * editState._scale.sx, y: rc.height * m * editState._scale.sy },
-    { x: rc.width * (1 - m) * editState._scale.sx, y: rc.height * m * editState._scale.sy },
-    { x: rc.width * (1 - m) * editState._scale.sx, y: rc.height * (1 - m) * editState._scale.sy },
-    { x: rc.width * m * editState._scale.sx, y: rc.height * (1 - m) * editState._scale.sy },
-  ];
-  editState.corners = dispToSource(editState);
-  drawEditor();
+  if (!editState) return;
+  // marges symétriques : même rectangle quelle que soit la rotation
+  editState.corners = fallbackRect(editState.base.width, editState.base.height);
+  if (editState._scale) layoutEditor();
 });
 function reopenEditorImg() {
   renderEditorImage(true);
@@ -1239,35 +1394,46 @@ $('livePreviewToggle').addEventListener('change', (e) => {
 });
 
 /* annuler / supprimer */
-$('editCancel').addEventListener('click', () => { clearNormCache(editState); editState = null; show('home'); refreshHome(); });
+$('editCancel').addEventListener('click', () => {
+  // ré-édition annulée -> retour à l'aperçu de la page, sinon à l'accueil
+  const idx = editState ? editState.pageIndex : null;
+  closeEditor();
+  if (idx !== null && idx < pages.length) openPageViewer(idx);
+  else { show('home'); refreshHome(); }
+});
 $('deletePage').addEventListener('click', () => {
   if (editState.pageIndex !== null) {
     if (!confirm('Supprimer cette page ?')) return;
+    freePage(pages[editState.pageIndex]);
     pages.splice(editState.pageIndex, 1);
   }
-  clearNormCache(editState); editState = null; show('home'); refreshHome();
+  closeEditor(); show('home'); refreshHome();
 });
 
 /* valider */
 $('editDone').addEventListener('click', async () => {
+  if (!editState) return;
+  const st = editState;
   showLoader('Application…');
   try {
+    await ensureCv('Application…');
     await new Promise(r => setTimeout(r, 30));
-    const result = renderPage(editState);
+    const result = renderPage(st);
+    // stockage compact : JPEG (≈ 1-2 Mo) au lieu de canvas (≈ 30 Mo) par page
+    const blob = await canvasToBlob(result, 0.92);
+    const baseBlob = st.baseBlob || await canvasToBlob(st.base, 0.92);
     const pageData = {
-      base: editState.base,
-      corners: dispToSource(editState),
-      rotation: editState.rotation,
-      filter: editState.filter,
-      darkness: editState.darkness,
-      canvas: result,
-      thumb: result.toDataURL('image/jpeg', 0.6),
+      baseBlob, blob, url: URL.createObjectURL(blob),
+      thumb: makeThumb(result),
+      w: result.width, h: result.height,
+      corners: st.corners.map(p => ({ ...p })),
+      rotation: st.rotation, filter: st.filter, darkness: st.darkness,
     };
+    releaseCanvas(result);
     let idx;
-    if (editState.pageIndex !== null) { idx = editState.pageIndex; pages[idx] = pageData; }
+    if (st.pageIndex !== null) { idx = st.pageIndex; freePage(pages[idx]); pages[idx] = pageData; }
     else { pages.push(pageData); idx = pages.length - 1; }
-    clearNormCache(editState);
-    editState = null;
+    closeEditor();
     hideLoader();
     refreshHome();
     openPageViewer(idx);   // après validation -> aperçu en grand
@@ -1282,13 +1448,12 @@ function dispToSource(st) {
   const rotPts = st._disp.map(p => ({ x: p.x / sx, y: p.y / sy }));
   // inverse de rotateCorners
   const deg = ((st.rotation % 360) + 360) % 360;
-  const rc = rotatedCanvas(st.base, deg);
-  const W = st.base.width, H = st.base.height;
+  const W = st.base.width, H = st.base.height;   // tourné de 90/270 : largeur = H, hauteur = W
   return rotPts.map(p => {
     if (deg === 0)   return { x: p.x, y: p.y };
-    if (deg === 90)  return { x: p.y, y: rc.width - p.x };
+    if (deg === 90)  return { x: p.y, y: H - p.x };
     if (deg === 180) return { x: W - p.x, y: H - p.y };
-    return { x: rc.height - p.y, y: p.x }; // 270
+    return { x: W - p.y, y: p.x }; // 270
   });
 }
 
@@ -1296,8 +1461,10 @@ function dispToSource(st) {
    Rendu final d'une page : warp + filtre
    ============================================================ */
 function renderPage(st) {
-  const rc = rotatedCanvas(st.base, st.rotation);
-  const corners = st._disp.map(p => ({ x: p.x / st._scale.sx, y: p.y / st._scale.sy }));
+  // part des coins figés en coordonnées source : ne dépend pas de l'affichage
+  // (plus de plantage si on valide avant que l'image soit à l'écran)
+  const rc = editRotated(st);
+  const corners = rotateCorners(st.corners, st.base.width, st.base.height, st.rotation);
   const [tl, tr, br, bl] = corners;
   const wTop = dist(tl, tr), wBot = dist(bl, br);
   const hL = dist(tl, bl), hR = dist(tr, br);
@@ -1309,7 +1476,9 @@ function renderPage(st) {
   if (cvReady) warped = warpCv(rc, corners, outW, outH);
   else warped = warpFallback(rc, corners, outW, outH);
 
-  return applyFilter(warped, st.filter, st.darkness);
+  const out = applyFilter(warped, st.filter, st.darkness);
+  if (out !== warped) releaseCanvas(warped);
+  return out;
 }
 function dist(a, b) { return Math.hypot(a.x - b.x, a.y - b.y); }
 
@@ -1366,7 +1535,8 @@ function bwComputeNorm(canvas) {
   if (scale < 1) cv.resize(gray, work, new cv.Size(sw, sh), 0, 0, cv.INTER_AREA);
   else gray.copyTo(work);
   let ks = Math.round(Math.max(sw, sh) / 40); if (ks % 2 === 0) ks++; if (ks < 15) ks = 15;
-  const kernel = cv.getStructuringElement(cv.MORPH_ELLIPSE, new cv.Size(ks, ks));
+  // noyau rectangulaire : séparable, ~20x plus rapide que l'ellipse, rendu identique
+  const kernel = cv.getStructuringElement(cv.MORPH_RECT, new cv.Size(ks, ks));
   cv.morphologyEx(work, work, cv.MORPH_CLOSE, kernel);
   cv.GaussianBlur(work, work, new cv.Size(ks, ks), 0);
   const bg = new cv.Mat();
@@ -1496,15 +1666,16 @@ async function exportPDF() {
     const pdf = new jsPDF({ unit: 'mm', format: 'a4' });
     const pageW = 210, pageH = 297, margin = 8;
     const maxW = pageW - margin * 2, maxH = pageH - margin * 2;
-    pages.forEach((p, i) => {
+    for (let i = 0; i < pages.length; i++) {
+      const p = pages[i];
       if (i > 0) pdf.addPage();
-      const c = p.canvas;
-      const ratio = Math.min(maxW / c.width, maxH / c.height);
-      const w = c.width * ratio, h = c.height * ratio;
+      const ratio = Math.min(maxW / p.w, maxH / p.h);
+      const w = p.w * ratio, h = p.h * ratio;
       const x = (pageW - w) / 2, y = (pageH - h) / 2;
-      const data = c.toDataURL('image/jpeg', 0.92);
-      pdf.addImage(data, 'JPEG', x, y, w, h);
-    });
+      // JPEG déjà encodé inséré tel quel : aucune recompression
+      const bytes = new Uint8Array(await p.blob.arrayBuffer());
+      pdf.addImage(bytes, 'JPEG', x, y, w, h);
+    }
     const name = `Scan_${dateStamp()}.pdf`;
     const blob = pdf.output('blob');
     const shared = await shareOrDownload(blob, name, 'application/pdf');
@@ -1517,12 +1688,11 @@ async function exportPDF() {
 async function exportJPG() {
   showLoader('Préparation…');
   try {
-    const files = [];
-    for (let i = 0; i < pages.length; i++) {
-      const blob = await new Promise(r => pages[i].canvas.toBlob(r, 'image/jpeg', 0.9));
+    const stamp = dateStamp();
+    const files = pages.map((p, i) => {
       const suffix = pages.length > 1 ? `_${i + 1}` : '';
-      files.push(new File([blob], `Scan_${dateStamp()}${suffix}.jpg`, { type: 'image/jpeg' }));
-    }
+      return new File([p.blob], `Scan_${stamp}${suffix}.jpg`, { type: 'image/jpeg' });
+    });
     if (navigator.canShare && navigator.canShare({ files })) {
       hideLoader();
       await navigator.share({ files });
@@ -1600,6 +1770,13 @@ function downloadFile(blob, name) {
 
 /* init */
 refreshHome();
+
+/* service worker : garde le moteur (11 Mo) en cache -> lancement instantané, hors ligne */
+if ('serviceWorker' in navigator) {
+  window.addEventListener('load', () => {
+    navigator.serviceWorker.register('sw.js').catch(err => console.warn('Service worker', err));
+  });
+}
 </script>
 </body>
 </html>
