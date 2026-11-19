@@ -706,7 +706,14 @@ let camLastHitTime = 0;       // dernière détection réussie (expiration du ca
 const CAM_QUAD_TTL = 1500;    // ms sans détection avant de retirer le cadre
 const camDet = document.createElement('canvas');
 
+let camStarting = false;
 async function startLiveCamera() {
+  if (camStarting || camStream) return;   // double appui : une seule caméra
+  camStarting = true;
+  try { await openLiveCamera(); } finally { camStarting = false; }
+}
+
+async function openLiveCamera() {
   addingPage = pages.length > 0;
   if (!navigator.mediaDevices || !navigator.mediaDevices.getUserMedia) {
     return triggerInput('cameraInput'); // repli prise de photo
@@ -734,6 +741,8 @@ async function startLiveCamera() {
   $('camHint').classList.remove('locked');
   try { await v.play(); } catch (_) {}
   const begin = () => {
+    v.onloadedmetadata = null;
+    if (camRAF || !camStream) return;   // déjà lancée (ancien handler resté accroché)
     resizeOverlay();
     // résolution réelle du flux : 8,3 MP = 4K ; 2,1 MP = limité au 1080p
     const mp = v.videoWidth * v.videoHeight / 1e6;
@@ -778,6 +787,8 @@ function camLoop() {
     camDetScale = v.videoWidth / detW;
     const q = detectQuad(camDet);
     if (q) {
+      // trou de plus de 400 ms : le téléphone a bougé, on repart d'un historique neuf
+      if (performance.now() - camLastHitTime > 400) camQuadHistory = [];
       camQuadHistory.push(q);
       if (camQuadHistory.length > 5) camQuadHistory.shift();
       camLastQuad = smoothQuad(camQuadHistory);
@@ -835,53 +846,67 @@ $('camShoot').addEventListener('click', async () => {
   const v = $('camVideo');
   if (!v.videoWidth || camShooting) return;
   camShooting = true;
-  // image du flux (toujours dispo) + cadre live que l'utilisateur a vu
-  const frame = document.createElement('canvas');
-  frame.width = v.videoWidth; frame.height = v.videoHeight;
-  frame.getContext('2d').drawImage(v, 0, 0);
-  const liveQuad = camLastQuad;
-  const detScale = camDetScale;
-  showLoader('Capture…');
-  // vraie photo pleine résolution du capteur quand le navigateur le permet (Android)
-  let photo = null;
-  const track = camStream && camStream.getVideoTracks()[0];
-  if (track && 'ImageCapture' in window) {
-    try {
-      const blob = await new ImageCapture(track).takePhoto();
-      const bmp = await createImageBitmap(blob, { imageOrientation: 'from-image' });
-      photo = bitmapToCanvas(bmp, MAX_SIDE);
-      freeBitmap(bmp);
-    } catch (err) { console.warn('takePhoto indisponible, image du flux', err); }
-  }
-  stopCamera();
   try {
+    // image du flux (toujours dispo) + cadre live que l'utilisateur a vu
+    const frame = document.createElement('canvas');
+    frame.width = v.videoWidth; frame.height = v.videoHeight;
+    frame.getContext('2d').drawImage(v, 0, 0);
+    const liveQuad = camLastQuad;
+    const detScale = camDetScale;
+    showLoader('Capture…');
+    // vraie photo pleine résolution du capteur quand le navigateur le permet
+    let photo = null;
+    const track = camStream && camStream.getVideoTracks()[0];
+    if (track && 'ImageCapture' in window) {
+      try {
+        const blob = await Promise.race([
+          new ImageCapture(track).takePhoto(),
+          new Promise((_, rej) => setTimeout(() => rej(new Error('takePhoto timeout')), 4000)),
+        ]);
+        const bmp = await createImageBitmap(blob, { imageOrientation: 'from-image' });
+        photo = bitmapToCanvas(bmp, MAX_SIDE);
+        freeBitmap(bmp);
+      } catch (err) { console.warn('takePhoto indisponible, image du flux', err); }
+    }
+    stopCamera();
     await ensureCv();
     showLoader('Détection des bords…');
-    let base, corners;
-    // la photo n'a pas forcément le cadrage du flux : on y refait la détection
-    const qPhoto = photo ? detectScaled(photo) : null;
-    if (qPhoto) {
-      base = photo; corners = qPhoto;
-    } else if (liveQuad) {
-      // le live avait accroché : on réutilise ce que l'utilisateur a vu
-      base = bitmapToCanvas(frame, MAX_SIDE);
-      const s = base.width / frame.width;
-      corners = liveQuad.map(p => ({ x: p.x * detScale * s, y: p.y * detScale * s }));
-    } else {
-      // rien d'accroché : meilleure image dispo + détection sur l'image figée
-      base = photo || bitmapToCanvas(frame, MAX_SIDE);
-      corners = detectCorners(base);
+    let base = null, corners = null;
+    // 1) photo capteur (cadrage différent du flux) : détection dessus
+    if (photo) { corners = detectScaled(photo); if (corners) base = photo; }
+    if (!base) {
+      // 2) image figée du flux : détection sur ce qui a VRAIMENT été pris ;
+      //    le cadre live (moyenne des dernières détections) ne sert qu'en secours
+      const fb = bitmapToCanvas(frame, MAX_SIDE);
+      corners = detectScaled(fb);
+      if (!corners && liveQuad) {
+        const s = fb.width / frame.width;
+        corners = liveQuad.map(p => ({ x: p.x * detScale * s, y: p.y * detScale * s }));
+      }
+      if (corners) base = fb;
+      else {
+        // 3) rien nulle part : meilleure image dispo + rectangle par défaut
+        base = photo || fb;
+        if (base !== fb) releaseCanvas(fb);
+        corners = fallbackRect(base.width, base.height);
+      }
     }
     if (photo && base !== photo) releaseCanvas(photo);
     releaseCanvas(frame);
     hideLoader();
     openEditor({ base, corners, rotation: 0, filter: 'bw', darkness: 58, pageIndex: null });
   } catch (err) {
-    console.error(err); hideLoader(); toast('Erreur de capture.');
+    console.error(err); stopCamera(); hideLoader(); toast('Erreur de capture.');
     show('home'); refreshHome();
   } finally {
     camShooting = false;
   }
+});
+
+/* app en arrière-plan / écran verrouillé pendant la caméra : iOS coupe le flux
+   (image noire ou figée au retour) -> on ferme proprement et on revient à l'accueil */
+document.addEventListener('visibilitychange', () => {
+  if (document.hidden && camStream && !camShooting) { stopCamera(); show('home'); refreshHome(); }
 });
 
 let _relayoutTimer = null;
@@ -984,29 +1009,32 @@ function detectQuad(canvas) {
 
   /* extrait le meilleur quad 4-sommets convexe depuis un masque binaire */
   function bestQuadFromMask(mask) {
-    const contours = new cv.MatVector();
+    const contours = M(new cv.MatVector());
     const hier = M(new cv.Mat());
     cv.findContours(mask, contours, hier, cv.RETR_EXTERNAL, cv.CHAIN_APPROX_SIMPLE);
     let best = null, bestA = minArea;
     for (let i = 0; i < contours.size(); i++) {
       const cnt = contours.get(i);
-      const area = Math.abs(cv.contourArea(cnt));
-      if (area > bestA && area < maxArea) {
-        const peri = cv.arcLength(cnt, true);
-        const approx = new cv.Mat();
-        cv.approxPolyDP(cnt, approx, 0.02 * peri, true);
-        if (approx.rows === 4 && cv.isContourConvex(approx)) {
-          const pts = [];
-          for (let j = 0; j < 4; j++)
-            pts.push({ x: approx.data32S[j * 2], y: approx.data32S[j * 2 + 1] });
-          const qa = polyArea(pts);
-          if (qa > bestA && qa < maxArea) { best = pts; bestA = qa; }
+      let approx = null;
+      try {
+        const area = Math.abs(cv.contourArea(cnt));
+        if (area > bestA && area < maxArea) {
+          const peri = cv.arcLength(cnt, true);
+          approx = new cv.Mat();
+          cv.approxPolyDP(cnt, approx, 0.02 * peri, true);
+          if (approx.rows === 4 && cv.isContourConvex(approx)) {
+            const pts = [];
+            for (let j = 0; j < 4; j++)
+              pts.push({ x: approx.data32S[j * 2], y: approx.data32S[j * 2 + 1] });
+            const qa = polyArea(pts);
+            if (qa > bestA && qa < maxArea) { best = pts; bestA = qa; }
+          }
         }
-        approx.delete();
+      } finally {
+        if (approx) approx.delete();
+        cnt.delete();
       }
-      cnt.delete();
     }
-    contours.delete();
     return best;
   }
 
@@ -1082,7 +1110,13 @@ function orderCorners(pts) {
   const tl = bySum[0], br = bySum[3];
   const byDiff = [...pts].sort((a, b) => (a.y - a.x) - (b.y - b.x));
   const tr = byDiff[0], bl = byDiff[3];
-  return [tl, tr, br, bl];
+  if (new Set([tl, tr, br, bl]).size === 4) return [tl, tr, br, bl];
+  // égalité (document penché pile à 45°) : tri dans le sens horaire autour du
+  // centre, en partant du point le plus en haut à gauche
+  const cx = pts.reduce((s, p) => s + p.x, 0) / 4, cy = pts.reduce((s, p) => s + p.y, 0) / 4;
+  const cw = [...pts].sort((a, b) => Math.atan2(a.y - cy, a.x - cx) - Math.atan2(b.y - cy, b.x - cx));
+  const i0 = cw.indexOf(tl);
+  return [0, 1, 2, 3].map(k => cw[(i0 + k) % 4]);
 }
 
 /* ============================================================
@@ -1091,7 +1125,8 @@ function orderCorners(pts) {
 const DISPLAY_MAX = 1; // ratio géré par CSS, on stocke l'échelle
 let dragIndex = -1;
 
-let livePreview = localStorage.getItem('scanLivePreview') === '1';
+let livePreview = false;
+try { livePreview = localStorage.getItem('scanLivePreview') === '1'; } catch (_) { /* cookies bloqués */ }
 
 function openEditor(state) {
   closeEditor();
@@ -1346,6 +1381,7 @@ const wrap = $('canvasWrap');
 wrap.addEventListener('touchstart', startDrag, { passive: false });
 wrap.addEventListener('touchmove', moveDrag, { passive: false });
 wrap.addEventListener('touchend', endDrag);
+wrap.addEventListener('touchcancel', endDrag);
 wrap.addEventListener('mousedown', startDrag);
 window.addEventListener('mousemove', moveDrag);
 window.addEventListener('mouseup', endDrag);
@@ -1382,7 +1418,7 @@ $('darknessSlider').addEventListener('input', (e) => {
 /* interrupteur aperçu live (mémorisé) */
 $('livePreviewToggle').addEventListener('change', (e) => {
   livePreview = e.target.checked;
-  localStorage.setItem('scanLivePreview', livePreview ? '1' : '0');
+  try { localStorage.setItem('scanLivePreview', livePreview ? '1' : '0'); } catch (_) { /* cookies bloqués */ }
   if (editState) renderEditorImage(false);
 });
 
@@ -1457,7 +1493,11 @@ function renderPage(st) {
   // part des coins figés en coordonnées source : ne dépend pas de l'affichage
   // (plus de plantage si on valide avant que l'image soit à l'écran)
   const rc = editRotated(st);
-  const corners = rotateCorners(st.corners, st.base.width, st.base.height, st.rotation);
+  const r = rotateCorners(st.corners, st.base.width, st.base.height, st.rotation);
+  // rotateCorners garde l'ordre source : on décale pour que le coin affiché en
+  // haut à gauche devienne le haut-gauche de la page (sinon le warp annule la rotation)
+  const k = (((st.rotation % 360) + 360) % 360) / 90;
+  const corners = r.map((_, i) => r[(i - k + 4) % 4]);
   const [tl, tr, br, bl] = corners;
   const wTop = dist(tl, tr), wBot = dist(bl, br);
   const hL = dist(tl, bl), hR = dist(tr, br);
@@ -1476,17 +1516,25 @@ function renderPage(st) {
 function dist(a, b) { return Math.hypot(a.x - b.x, a.y - b.y); }
 
 function warpCv(canvas, c, outW, outH) {
-  const src = cv.imread(canvas);
-  const dst = new cv.Mat();
-  const srcTri = cv.matFromArray(4, 1, cv.CV_32FC2, [c[0].x, c[0].y, c[1].x, c[1].y, c[2].x, c[2].y, c[3].x, c[3].y]);
-  const dstTri = cv.matFromArray(4, 1, cv.CV_32FC2, [0, 0, outW, 0, outW, outH, 0, outH]);
-  const M = cv.getPerspectiveTransform(srcTri, dstTri);
-  cv.warpPerspective(src, dst, M, new cv.Size(outW, outH), cv.INTER_LINEAR, cv.BORDER_CONSTANT, new cv.Scalar(255, 255, 255, 255));
-  const out = document.createElement('canvas');
-  out.width = outW; out.height = outH;
-  cv.imshow(out, dst);
-  src.delete(); dst.delete(); srcTri.delete(); dstTri.delete(); M.delete();
-  return out;
+  return withMats((M) => {
+    const src = M(cv.imread(canvas));
+    const dst = M(new cv.Mat());
+    const srcTri = M(cv.matFromArray(4, 1, cv.CV_32FC2, [c[0].x, c[0].y, c[1].x, c[1].y, c[2].x, c[2].y, c[3].x, c[3].y]));
+    const dstTri = M(cv.matFromArray(4, 1, cv.CV_32FC2, [0, 0, outW, 0, outW, outH, 0, outH]));
+    const T = M(cv.getPerspectiveTransform(srcTri, dstTri));
+    cv.warpPerspective(src, dst, T, new cv.Size(outW, outH), cv.INTER_LINEAR, cv.BORDER_CONSTANT, new cv.Scalar(255, 255, 255, 255));
+    const out = document.createElement('canvas');
+    out.width = outW; out.height = outH;
+    cv.imshow(out, dst);
+    return out;
+  });
+}
+
+/* exécute fn(M) et libère tous les Mat enregistrés via M(), même en cas d'erreur */
+function withMats(fn) {
+  const trash = [];
+  try { return fn((m) => { trash.push(m); return m; }); }
+  finally { trash.forEach((m) => { try { m.delete(); } catch (_) {} }); }
 }
 
 /* fallback : simple crop à la bounding box (sans correction de perspective) */
@@ -1513,8 +1561,9 @@ function applyFilter(canvas, filter, darkness) {
    par division -> papier blanc uniforme, ombres/éclairage inégal effacés.
    Renvoie un cv.Mat à libérer par l'appelant. */
 function bwComputeNorm(canvas) {
-  const src = cv.imread(canvas);
-  const gray = new cv.Mat();
+  return withMats((M) => {
+  const src = M(cv.imread(canvas));
+  const gray = M(new cv.Mat());
   cv.cvtColor(src, gray, cv.COLOR_RGBA2GRAY);
   // débruitage : supprime le grain du papier/capteur -> fond lisse façon Genius,
   // en préservant les bords du texte (médian 3, sans étaler les fins traits).
@@ -1524,23 +1573,22 @@ function bwComputeNorm(canvas) {
   const scale = Math.min(1, maxBg / Math.max(gray.cols, gray.rows));
   const sw = Math.max(1, Math.round(gray.cols * scale));
   const sh = Math.max(1, Math.round(gray.rows * scale));
-  const work = new cv.Mat();
+  const work = M(new cv.Mat());
   if (scale < 1) cv.resize(gray, work, new cv.Size(sw, sh), 0, 0, cv.INTER_AREA);
   else gray.copyTo(work);
   let ks = Math.round(Math.max(sw, sh) / 40); if (ks % 2 === 0) ks++; if (ks < 15) ks = 15;
   // noyau rectangulaire : séparable, ~20x plus rapide que l'ellipse, rendu identique
-  const kernel = cv.getStructuringElement(cv.MORPH_RECT, new cv.Size(ks, ks));
+  const kernel = M(cv.getStructuringElement(cv.MORPH_RECT, new cv.Size(ks, ks)));
   cv.morphologyEx(work, work, cv.MORPH_CLOSE, kernel);
   cv.GaussianBlur(work, work, new cv.Size(ks, ks), 0);
-  const bg = new cv.Mat();
+  const bg = M(new cv.Mat());
   if (scale < 1) cv.resize(work, bg, new cv.Size(gray.cols, gray.rows), 0, 0, cv.INTER_LINEAR);
   else work.copyTo(bg);
-  work.delete(); kernel.delete();
 
-  const norm = new cv.Mat();
-  cv.divide(gray, bg, norm, 255);
-  src.delete(); gray.delete(); bg.delete();
+  const norm = new cv.Mat();   // rendu à l'appelant : pas dans la corbeille
+  try { cv.divide(gray, bg, norm, 255); } catch (err) { norm.delete(); throw err; }
   return norm;
+  });
 }
 
 /* Étape LÉGÈRE (recalculée à chaque geste du curseur) : courbe de niveaux
@@ -1549,26 +1597,27 @@ function bwApplyLevels(normMat, outWidth, outHeight, darkness) {
   const d = (typeof darkness === 'number') ? darkness : 50;
   const Bp = 75 + (d / 100) * 100;   // point noir : 75 -> 175
   const Wp = 215 - (d / 100) * 25;   // point blanc : 215 -> 190 (fond forcé blanc)
-  const lut = new cv.Mat(1, 256, cv.CV_8U);
+  return withMats((M) => {
+  const lut = M(new cv.Mat(1, 256, cv.CV_8U));
   const ld = lut.data;
   for (let i = 0; i < 256; i++) {
     let v = (i - Bp) / (Wp - Bp);
     v = v < 0 ? 0 : v > 1 ? 1 : v;
     ld[i] = Math.round(v * 255);
   }
-  const out8 = new cv.Mat();
+  const out8 = M(new cv.Mat());
   cv.LUT(normMat, lut, out8);
 
-  const blurS = new cv.Mat();
+  const blurS = M(new cv.Mat());
   cv.GaussianBlur(out8, blurS, new cv.Size(0, 0), 0.8);
-  const sharp = new cv.Mat();
+  const sharp = M(new cv.Mat());
   cv.addWeighted(out8, 1.6, blurS, -0.6, 0, sharp);
 
   const out = document.createElement('canvas');
   out.width = outWidth; out.height = outHeight;
   cv.imshow(out, sharp);
-  lut.delete(); out8.delete(); blurS.delete(); sharp.delete();
   return out;
+  });
 }
 
 /* N&B "document" facon Genius : combine les deux étapes (rendu final, one-shot). */
@@ -1671,6 +1720,7 @@ async function exportPDF() {
     }
     const name = `Scan_${dateStamp()}.pdf`;
     const blob = pdf.output('blob');
+    hideLoader();   // sinon il reste derrière le partage et bloque tout s'il ne revient pas
     const shared = await shareOrDownload(blob, name, 'application/pdf');
     if (shared) { show('home'); refreshHome(); }
   } catch (err) {
@@ -1708,7 +1758,11 @@ async function shareOrDownload(blob, name, type) {
   const file = new File([blob], name, { type });
   if (navigator.canShare && navigator.canShare({ files: [file] })) {
     try { await navigator.share({ files: [file] }); return true; }
-    catch (err) { if (err && err.name === 'AbortError') return false; }
+    catch (err) {
+      if (err && err.name === 'AbortError') return false;
+      // le partage existe mais a échoué : ne pas annoncer un fichier enregistré
+      console.error(err); toast('Partage impossible, réessaie.'); return false;
+    }
   }
   downloadFile(blob, name);
   toast('Fichier téléchargé.');

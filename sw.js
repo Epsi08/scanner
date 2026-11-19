@@ -8,9 +8,14 @@ const CACHE = 'scanner-v1';
 const PRECACHE = ['./', './opencv.js', './jspdf.umd.min.js'];
 
 self.addEventListener('install', (e) => {
+  // n'ajoute que ce qui manque : une mise à jour de sw.js ne retélécharge pas les 11 Mo
   e.waitUntil(
     caches.open(CACHE)
-      .then((c) => c.addAll(PRECACHE))
+      .then(async (c) => {
+        for (const url of PRECACHE) {
+          if (!(await c.match(url))) await c.add(url);
+        }
+      })
       .then(() => self.skipWaiting())
   );
 });
@@ -29,17 +34,23 @@ self.addEventListener('fetch', (e) => {
 
   const isPage = req.mode === 'navigate' || /\/$|\.html$/.test(new URL(req.url).pathname);
   if (isPage) {
+    // réseau d'abord, mais pas plus de 3 s : avec un réseau faible on affiche
+    // la copie locale au lieu d'un écran blanc (la copie se met à jour en fond)
+    const network = fetch(req).then((res) => {
+      if (res.ok) {
+        const copy = res.clone();
+        caches.open(CACHE).then((c) => c.put(req, copy));
+      }
+      return res;
+    });
+    const cached = () => caches.match(req).then((r) => r || caches.match('./'));
     e.respondWith(
-      fetch(req)
-        .then((res) => {
-          if (res.ok) {
-            const copy = res.clone();
-            caches.open(CACHE).then((c) => c.put(req, copy));
-          }
-          return res;
-        })
-        .catch(() => caches.match(req).then((r) => r || caches.match('./')))
+      Promise.race([
+        network.catch(() => null),
+        new Promise((resolve) => setTimeout(() => resolve(null), 3000)),
+      ]).then(async (res) => res || (await cached()) || network)
     );
+    e.waitUntil(network.catch(() => {}));
     return;
   }
 
