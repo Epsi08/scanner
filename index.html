@@ -252,6 +252,8 @@
     background: rgba(255,255,255,.15); padding: 3px 9px; border-radius: 10px;
   }
   .cam-res:empty { display: none; }
+  .cap-info { display: block; font-size: 11px; font-weight: 400; color: #9a9a9a; text-align: center; }
+  .cap-info:empty { display: none; }
   .cam-bottom {
     position: absolute; left: 0; right: 0; bottom: 0;
     padding-bottom: calc(var(--safe-bottom) + 28px); padding-top: 20px;
@@ -376,7 +378,7 @@
     <button class="iconbtn" id="editCancel" style="position:absolute;left:12px;top:calc(var(--safe-top) + 8px);">
       <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M18 6 6 18M6 6l12 12"/></svg>
     </button>
-    <div class="title">Ajuster</div>
+    <div class="title">Ajuster<span class="cap-info" id="capInfo"></span></div>
     <button class="iconbtn" id="editDone" style="position:absolute;right:12px;top:calc(var(--safe-top) + 8px);color:var(--accent);font-weight:700;width:auto;border-radius:20px;padding:0 6px;">
       <span style="font-size:16px;font-weight:600;">OK</span>
     </button>
@@ -720,8 +722,9 @@ async function openLiveCamera() {
   }
   try {
     camStream = await navigator.mediaDevices.getUserMedia({
-      // on demande le maximum (4K) : sans photo native, l'image capturée vient de ce flux
-      video: { facingMode: { ideal: 'environment' }, width: { ideal: 3840 }, height: { ideal: 2160 } },
+      // format 12 MP 4:3 du capteur si l'iPhone l'offre (sinon le plus proche) : il fixe aussi
+      // la taille de la photo. Pas de frameRate : en imposer un peut écarter ce format.
+      video: { facingMode: { ideal: 'environment' }, width: { ideal: 4032 }, height: { ideal: 3024 } },
       audio: false,
     });
   } catch (err) {
@@ -734,6 +737,8 @@ async function openLiveCamera() {
   camLastQuad = null;
   camQuadHistory = [];
   camFrameCount = 0;
+  camNextDet = 0;
+  camPending = null;
   camLastHitTime = 0;
   $('camRes').textContent = '';
   show('camera');
@@ -744,7 +749,7 @@ async function openLiveCamera() {
     v.onloadedmetadata = null;
     if (camRAF || !camStream) return;   // déjà lancée (ancien handler resté accroché)
     resizeOverlay();
-    // résolution réelle du flux : 8,3 MP = 4K ; 2,1 MP = limité au 1080p
+    // résolution réelle du flux : 12,2 MP = plein capteur ; 8,3 = 4K ; 2,1 = limité au 1080p
     const mp = v.videoWidth * v.videoHeight / 1e6;
     $('camRes').textContent = mp ? mp.toFixed(1).replace('.', ',') + ' MP' : '';
     camLoop();
@@ -776,16 +781,41 @@ function smoothQuad(history) {
   }));
 }
 
+/* garde-fou : une détection isolée qui saute loin du cadre affiché doit être
+   confirmée par la suivante (un cadre faux sur une seule image n'apparaît jamais) */
+let camPending = null;         // détection en attente de confirmation
+/* écart maxi entre coins de deux quads, en fraction de la largeur de détection */
+function quadJump(a, b, w) {
+  let m = 0;
+  for (let i = 0; i < 4; i++) m = Math.max(m, Math.hypot(a[i].x - b[i].x, a[i].y - b[i].y));
+  return m / w;
+}
+/* à appeler dans camLoop à la place du traitement direct de q ; renvoie le quad à
+   utiliser (ou null si la détection doit encore être confirmée) */
+function camGate(q, detW) {
+  if (!q) { camPending = null; return null; }
+  // proche du cadre déjà affiché : on accepte directement
+  if (camLastQuad && quadJump(q, camLastQuad, detW) < 0.06) { camPending = null; return q; }
+  // sinon : accepté seulement si la détection précédente disait la même chose
+  if (camPending && quadJump(q, camPending, detW) < 0.06) { camPending = null; camQuadHistory = []; return q; }
+  camPending = q;
+  return null;
+}
+
+let camNextDet = 0;            // pas de détection avant cet instant (ms)
 function camLoop() {
   if (!camStream) return;
   const v = $('camVideo');
   camFrameCount++;
-  if (cvReady && v.videoWidth && camFrameCount % 4 === 0) {
+  if (cvReady && v.videoWidth && camFrameCount % 4 === 0 && performance.now() >= camNextDet) {
+    const tDet = performance.now();
     const detW = 480, detH = Math.round(detW * v.videoHeight / v.videoWidth);
     camDet.width = detW; camDet.height = detH;
     camDet.getContext('2d').drawImage(v, 0, 0, detW, detH);
     camDetScale = v.videoWidth / detW;
-    const q = detectQuad(camDet);
+    const q = camGate(detectQuad(camDet), detW);
+    // téléphone lent : la détection n'occupe jamais plus d'un tiers du temps
+    camNextDet = performance.now() + 2 * (performance.now() - tDet);
     if (q) {
       // trou de plus de 400 ms : le téléphone a bougé, on repart d'un historique neuf
       if (performance.now() - camLastHitTime > 400) camQuadHistory = [];
@@ -813,8 +843,9 @@ function drawCamOverlay() {
     hint.classList.remove('locked');
     return;
   }
-  hint.textContent = 'Document détecté ✓';
-  hint.classList.add('locked');
+  const far = capTooFar($('camVideo'));
+  hint.textContent = far ? 'Rapproche-toi' : 'Document détecté ✓';
+  hint.classList.toggle('locked', !far);
   const r = videoDisplayRect();
   const pts = camLastQuad.map(p => ({
     x: r.offX + p.x * camDetScale * r.scaleFromVideo,
@@ -841,6 +872,101 @@ function stopCamera() {
 
 $('camCancel').addEventListener('click', () => { stopCamera(); show('home'); refreshHome(); });
 
+/* vraie photo du capteur (Safari 18.4+). Sans taille demandée, Safari choisit la PLUS
+   PETITE photo disponible : on réclame donc explicitement la plus grande. */
+async function capTakePhoto(track) {
+  if (!track || !('ImageCapture' in window) || !window.ImageCapture) return null;
+  try {
+    const ic = new ImageCapture(track);
+    const work = (async () => {
+      let opts;
+      try {
+        const pc = await ic.getPhotoCapabilities();
+        if (pc && pc.imageWidth && pc.imageHeight && pc.imageWidth.max && pc.imageHeight.max)
+          opts = { imageWidth: pc.imageWidth.max, imageHeight: pc.imageHeight.max };
+      } catch (_) { /* pas de capacités : on tente sans taille */ }
+      if (!opts) return ic.takePhoto();
+      try { return await ic.takePhoto(opts); } catch (_) { return ic.takePhoto(); }
+    })();
+    const blob = await Promise.race([work,
+      new Promise((_, rej) => setTimeout(() => rej(new Error('takePhoto timeout')), 4000))]);
+    const bmp = await createImageBitmap(blob, { imageOrientation: 'from-image' });
+    const mp = bmp.width * bmp.height / 1e6;
+    const canvas = bitmapToCanvas(bmp, MAX_SIDE);
+    freeBitmap(bmp);
+    return { canvas, mp };
+  } catch (err) { console.warn('takePhoto indisponible, image du flux', err); return null; }
+}
+
+/* netteté : variance du Laplacien dans le cadre (ou au centre si pas de cadre)
+   canvas : image source ; quad : 4 coins en px de ce canvas, ou null */
+function capSharpness(canvas, quad) {
+  if (!cvReady) return 0;
+  // zone mesurée : boîte englobante du cadre, rétrécie de 10 % (on évite la table)
+  let x0 = canvas.width * 0.2, y0 = canvas.height * 0.2, x1 = canvas.width * 0.8, y1 = canvas.height * 0.8;
+  if (quad) {
+    const xs = quad.map(p => p.x), ys = quad.map(p => p.y);
+    const bx0 = Math.min(...xs), bx1 = Math.max(...xs), by0 = Math.min(...ys), by1 = Math.max(...ys);
+    x0 = bx0 + 0.1 * (bx1 - bx0); x1 = bx1 - 0.1 * (bx1 - bx0);
+    y0 = by0 + 0.1 * (by1 - by0); y1 = by1 - 0.1 * (by1 - by0);
+  }
+  x0 = Math.max(0, Math.round(x0)); y0 = Math.max(0, Math.round(y0));
+  const w = Math.min(canvas.width - x0, Math.round(x1 - x0)), h = Math.min(canvas.height - y0, Math.round(y1 - y0));
+  if (w < 16 || h < 16) return 0;
+  // toujours mesurée à la même échelle (640 px de large maxi) pour comparer les images entre elles
+  const k = Math.min(1, 640 / w);
+  const tmp = document.createElement('canvas');
+  tmp.width = Math.max(16, Math.round(w * k)); tmp.height = Math.max(16, Math.round(h * k));
+  tmp.getContext('2d').drawImage(canvas, x0, y0, w, h, 0, 0, tmp.width, tmp.height);
+  const trash = [];
+  const M = (m) => { trash.push(m); return m; };
+  try {
+    const src = M(cv.imread(tmp));
+    const gray = M(new cv.Mat()), lap = M(new cv.Mat()), mean = M(new cv.Mat()), sd = M(new cv.Mat());
+    cv.cvtColor(src, gray, cv.COLOR_RGBA2GRAY);
+    cv.Laplacian(gray, lap, cv.CV_16S, 3);
+    cv.meanStdDev(lap, mean, sd);
+    return sd.data64F[0] * sd.data64F[0];
+  } catch (err) {
+    console.warn('Mesure de netteté échouée', err);
+    return 0;
+  } finally {
+    trash.forEach((t) => { try { t.delete(); } catch (_) {} });
+    releaseCanvas(tmp);
+  }
+}
+
+
+/* secours sans photo : quelques images du flux, on garde la plus nette
+   (2 canvas pleine taille au maximum) */
+async function capSharpest(video, first, liveQuad, detScale) {
+  const quad = liveQuad ? liveQuad.map(p => ({ x: p.x * detScale, y: p.y * detScale })) : null;
+  let best = first, bestS = capSharpness(first, quad), spare = null;
+  for (let i = 0; i < 4; i++) {
+    await new Promise(r => setTimeout(r, 70));
+    if (!camStream || !video.videoWidth) break;
+    const c = spare || document.createElement('canvas');
+    c.width = video.videoWidth; c.height = video.videoHeight;
+    c.getContext('2d').drawImage(video, 0, 0);
+    const s = capSharpness(c, quad);
+    if (s > bestS) { spare = best; best = c; bestS = s; } else spare = c;
+  }
+  if (spare) releaseCanvas(spare);
+  return best;
+}
+
+/* le document occupe trop peu de pixels pour que le petit texte soit net ?
+   (pas de conseil s'il remplit déjà l'image dans sa longueur) */
+function capTooFar(video) {
+  if (!camLastQuad) return false;
+  const q = camLastQuad.map(p => ({ x: p.x * camDetScale, y: p.y * camDetScale }));
+  const a = (dist(q[0], q[1]) + dist(q[3], q[2])) / 2, b = (dist(q[1], q[2]) + dist(q[0], q[3])) / 2;
+  const vs = Math.min(video.videoWidth, video.videoHeight), vl = Math.max(video.videoWidth, video.videoHeight);
+  return Math.min(a, b) < 900 && Math.min(a, b) < 0.55 * vs && Math.max(a, b) < 0.65 * vl;
+}
+
+const mpText = (mp) => mp.toFixed(1).replace('.', ',') + ' MP';
+
 let camShooting = false;
 $('camShoot').addEventListener('click', async () => {
   const v = $('camVideo');
@@ -848,26 +974,16 @@ $('camShoot').addEventListener('click', async () => {
   camShooting = true;
   try {
     // image du flux (toujours dispo) + cadre live que l'utilisateur a vu
-    const frame = document.createElement('canvas');
+    let frame = document.createElement('canvas');
     frame.width = v.videoWidth; frame.height = v.videoHeight;
     frame.getContext('2d').drawImage(v, 0, 0);
     const liveQuad = camLastQuad;
     const detScale = camDetScale;
     showLoader('Capture…');
-    // vraie photo pleine résolution du capteur quand le navigateur le permet
-    let photo = null;
-    const track = camStream && camStream.getVideoTracks()[0];
-    if (track && 'ImageCapture' in window) {
-      try {
-        const blob = await Promise.race([
-          new ImageCapture(track).takePhoto(),
-          new Promise((_, rej) => setTimeout(() => rej(new Error('takePhoto timeout')), 4000)),
-        ]);
-        const bmp = await createImageBitmap(blob, { imageOrientation: 'from-image' });
-        photo = bitmapToCanvas(bmp, MAX_SIDE);
-        freeBitmap(bmp);
-      } catch (err) { console.warn('takePhoto indisponible, image du flux', err); }
-    }
+    // vraie photo du capteur ; sinon la plus nette de quelques images du flux
+    const shot = await capTakePhoto(camStream && camStream.getVideoTracks()[0]);
+    const photo = shot && shot.canvas;
+    if (!photo) frame = await capSharpest(v, frame, liveQuad, detScale);
     stopCamera();
     await ensureCv();
     showLoader('Détection des bords…');
@@ -883,7 +999,14 @@ $('camShoot').addEventListener('click', async () => {
         const s = fb.width / frame.width;
         corners = liveQuad.map(p => ({ x: p.x * detScale * s, y: p.y * detScale * s }));
       }
-      if (corners) base = fb;
+      const sameFrame = photo && Math.abs(photo.width / photo.height - fb.width / fb.height) < 0.02;
+      if (corners && sameFrame) {
+        // même cadrage : on garde la photo (plus nette) avec les coins trouvés sur le flux
+        const kx = photo.width / fb.width, ky = photo.height / fb.height;
+        corners = corners.map(p => ({ x: p.x * kx, y: p.y * ky }));
+        base = photo;
+        releaseCanvas(fb);
+      } else if (corners) base = fb;
       else {
         // 3) rien nulle part : meilleure image dispo + rectangle par défaut
         base = photo || fb;
@@ -891,10 +1014,11 @@ $('camShoot').addEventListener('click', async () => {
         corners = fallbackRect(base.width, base.height);
       }
     }
+    const info = base === photo ? 'photo ' + mpText(shot.mp) : 'vidéo ' + mpText(frame.width * frame.height / 1e6);
     if (photo && base !== photo) releaseCanvas(photo);
     releaseCanvas(frame);
     hideLoader();
-    openEditor({ base, corners, rotation: 0, filter: 'bw', darkness: 50, pageIndex: null });
+    openEditor({ base, corners, rotation: 0, filter: 'bw', darkness: 50, pageIndex: null, info });
   } catch (err) {
     console.error(err); stopCamera(); hideLoader(); toast('Erreur de capture.');
     show('home'); refreshHome();
@@ -957,127 +1081,502 @@ function fallbackRect(W, H) {
   ];
 }
 
-/* aire d'un polygone (formule du lacet) */
-function polyArea(p) {
+/* ============================================================
+   DÉTECTION DU DOCUMENT (v2)
+   Principe : on ne fait plus confiance au premier masque venu.
+   1) on fabrique BEAUCOUP de quadrilatères candidats (contours de plusieurs
+      masques + combinaisons de droites de Hough) ;
+   2) chaque candidat est noté sur des preuves : part de chaque côté réellement
+      appuyée par un bord dans l'image (gradient, bon sens clair/sombre),
+      côté collé au bord de l'image = aucune preuve, droites qui « traversent »
+      (joint de carrelage, bord de table) pénalisées, forme plausible ;
+   3) le meilleur est recalé au sous-pixel sur les bords, puis re-noté.
+   Si rien n'est assez solide -> null (l'app affiche alors le cadre par défaut).
+   ============================================================ */
+const DET_WORK = 432;          // plus grand côté de l'image de travail (px)
+const DET_MIN_AREA = 0.08;     // part mini de l'image occupée par le document
+const DET_MAX_AREA = 0.97;
+const DET_ANGLE_MIN = 60, DET_ANGLE_MAX = 120;   // angles intérieurs plausibles (°)
+const DET_SIDE_RATIO = 2.0;    // rapport maxi entre côtés opposés
+const DET_ACCEPT = 0.62;       // note mini pour accepter un quad
+const DET_STRICT = 0.86;       // note exigée quand un côté se prolonge au-delà d'un coin
+
+/* aire signée (> 0 si sens horaire à l'écran, y vers le bas) */
+function quadSignedArea(q) {
   let a = 0;
-  for (let i = 0; i < p.length; i++) {
-    const j = (i + 1) % p.length;
-    a += p[i].x * p[j].y - p[j].x * p[i].y;
-  }
-  return Math.abs(a) / 2;
+  for (let i = 0; i < 4; i++) { const j = (i + 1) & 3; a += q[i].x * q[j].y - q[j].x * q[i].y; }
+  return a / 2;
 }
 
-/* d'un contour -> 4 coins : vrai quadrilatère si possible (perspective),
-   sinon rectangle orienté minimal (redressement même si la forme est irrégulière) */
-function quadFromContour(cnt) {
-  const hull = new cv.Mat();
-  cv.convexHull(cnt, hull);
-  const peri = cv.arcLength(hull, true);
-  let pts = null;
-  for (const eps of [0.02, 0.03, 0.05, 0.07, 0.1]) {
-    const ap = new cv.Mat();
-    cv.approxPolyDP(hull, ap, eps * peri, true);
-    if (ap.rows === 4) {
-      pts = [];
-      for (let i = 0; i < 4; i++) pts.push({ x: ap.data32S[i * 2], y: ap.data32S[i * 2 + 1] });
-    }
-    ap.delete();
-    if (pts) break;
+/* forme plausible ? (convexe, taille, angles, côtés opposés comparables) */
+function quadPlausible(q, w, h) {
+  const area = Math.abs(quadSignedArea(q));
+  if (area < DET_MIN_AREA * w * h || area > DET_MAX_AREA * w * h) return false;
+  const len = [];
+  let sign = 0;
+  for (let i = 0; i < 4; i++) {
+    const a = q[i], b = q[(i + 1) & 3], c = q[(i + 2) & 3];
+    // tolérance : un coin peut dépasser un peu du cadre (document au ras de l'image)
+    if (a.x < -0.03 * w || a.x > 1.03 * w || a.y < -0.03 * h || a.y > 1.03 * h) return false;
+    const ux = b.x - a.x, uy = b.y - a.y, vx = c.x - b.x, vy = c.y - b.y;
+    const lu = Math.hypot(ux, uy), lv = Math.hypot(vx, vy);
+    if (lu < 12 || lv < 12) return false;
+    len.push(lu);
+    const cr = ux * vy - uy * vx;
+    if (cr === 0) return false;
+    if (sign === 0) sign = cr > 0 ? 1 : -1; else if ((cr > 0 ? 1 : -1) !== sign) return false;   // non convexe
+    const ang = Math.acos(Math.max(-1, Math.min(1, -(ux * vx + uy * vy) / (lu * lv)))) * 180 / Math.PI;
+    if (ang < DET_ANGLE_MIN || ang > DET_ANGLE_MAX) return false;
   }
-  hull.delete();
-  if (pts) return pts;
-  // dernier recours : rectangle orienté minimal
-  const r = cv.minAreaRect(cnt);
-  const cx = r.center.x, cy = r.center.y, w = r.size.width, h = r.size.height;
-  const a = r.angle * Math.PI / 180, cos = Math.cos(a), sin = Math.sin(a);
-  return [[-1, -1], [1, -1], [1, 1], [-1, 1]].map(([ox, oy]) => ({
-    x: cx + (ox * w / 2) * cos - (oy * h / 2) * sin,
-    y: cy + (ox * w / 2) * sin + (oy * h / 2) * cos,
-  }));
+  const r1 = len[0] / len[2], r2 = len[1] / len[3];
+  if (r1 > DET_SIDE_RATIO || r1 < 1 / DET_SIDE_RATIO || r2 > DET_SIDE_RATIO || r2 < 1 / DET_SIDE_RATIO) return false;
+  return true;
 }
 
-/* renvoie le quadrilatère détecté (ordonné TL,TR,BR,BL) ou null si rien de fiable.
-   Méthode A (prioritaire) : Otsu + fermeture morphologique pour feuille claire sur fond sombre.
-   Méthode B (secours)     : Canny à seuils adaptatifs calculés depuis la médiane des pixels. */
-function detectQuad(canvas) {
-  if (!cvReady) return null;
-  const W = canvas.width, H = canvas.height;
-  const minArea = W * H * 0.20;
-  const maxArea = W * H * 0.95;   // rejette le fond entier pris pour un document
-  const trash = [];
-  const M = (m) => { trash.push(m); return m; };
-
-  /* extrait le meilleur quad 4-sommets convexe depuis un masque binaire */
-  function bestQuadFromMask(mask) {
-    const contours = M(new cv.MatVector());
-    const hier = M(new cv.Mat());
-    cv.findContours(mask, contours, hier, cv.RETR_EXTERNAL, cv.CHAIN_APPROX_SIMPLE);
-    let best = null, bestA = minArea;
-    for (let i = 0; i < contours.size(); i++) {
-      const cnt = contours.get(i);
-      let approx = null;
-      try {
-        const area = Math.abs(cv.contourArea(cnt));
-        if (area > bestA && area < maxArea) {
-          const peri = cv.arcLength(cnt, true);
-          approx = new cv.Mat();
-          cv.approxPolyDP(cnt, approx, 0.02 * peri, true);
-          if (approx.rows === 4 && cv.isContourConvex(approx)) {
-            const pts = [];
-            for (let j = 0; j < 4; j++)
-              pts.push({ x: approx.data32S[j * 2], y: approx.data32S[j * 2 + 1] });
-            const qa = polyArea(pts);
-            if (qa > bestA && qa < maxArea) { best = pts; bestA = qa; }
-          }
-        }
-      } finally {
-        if (approx) approx.delete();
-        cnt.delete();
+/* Appuis d'un segment : on avance le long du segment (pas `step`) et, à chaque point, on
+   cherche le pic de gradient le long de la normale (±R px), pour 4 « canaux » :
+   0 = luminance croissante vers l'intérieur, 1 = décroissante, 2 / 3 = idem en couleur.
+   Un point n'est « appuyé » que si ses voisins le long du segment ont leur pic au même
+   endroit (à 1 px près) : un vrai bord est une LIGNE continue, alors que la texture
+   (tissu, veinage du bois, motif) donne des pics épars.
+   Écrit les bits (1, 2, 4, 8) dans G.bits à partir de `at` ; renvoie le nombre de points. */
+function segmentBits(G, ax, ay, ux, uy, nx, ny, t0, t1, step, R, at) {
+  const w = G.w, h = G.h, gx = G.gx, gy = G.gy, cx = G.cx, cy = G.cy, pk = G.pk, bits = G.bits;
+  let n = 0;
+  for (let t = t0; t <= t1 && at + n < bits.length; t += step, n++) {
+    const px = ax + ux * t, py = ay + uy * t;
+    let gmax = G.tG, gmin = -G.tG, cmax = G.tC, cmin = -G.tC, i0 = -9, i1 = -9, i2 = -9, i3 = -9;
+    // un point posé sur le bord de l'image n'est appuyé par rien
+    if (px >= 2 && py >= 2 && px <= w - 3 && py <= h - 3) {
+      for (let k = -R; k <= R; k++) {
+        const xi = Math.round(px + k * nx), yi = Math.round(py + k * ny);
+        if (xi < 1 || yi < 1 || xi > w - 2 || yi > h - 2) continue;
+        const o = yi * w + xi;
+        const d = gx[o] * nx + gy[o] * ny, e = cx[o] * nx + cy[o] * ny;
+        if (d > gmax) { gmax = d; i0 = k; } else if (d < gmin) { gmin = d; i1 = k; }
+        if (e > cmax) { cmax = e; i2 = k; } else if (e < cmin) { cmin = e; i3 = k; }
       }
     }
-    return best;
+    const o4 = n * 4;
+    pk[o4] = i0; pk[o4 + 1] = i1; pk[o4 + 2] = i2; pk[o4 + 3] = i3;
   }
+  for (let j = 0; j < n; j++) {
+    let f = 0;
+    for (let c = 0; c < 4; c++) {
+      const v = pk[j * 4 + c];
+      if (v === -9) continue;
+      const okPrev = j === 0 || Math.abs(pk[(j - 1) * 4 + c] - v) <= 1;
+      const okNext = j === n - 1 || Math.abs(pk[(j + 1) * 4 + c] - v) <= 1;
+      if (okPrev && okNext && n > 1) f |= 1 << c;
+    }
+    bits[at + j] = f;
+  }
+  return n;
+}
 
+/* note un quad : part de chaque côté appuyée par un vrai bord.
+   Renvoie { mean, min, sides[4], mask } */
+function quadScore(q, G) {
+  const cw = quadSignedArea(q) > 0 ? 1 : -1;
+  const bits = G.bits, sideStart = [0, 0, 0, 0, 0];
+  let n = 0;
+  for (let i = 0; i < 4; i++) {
+    const a = q[i], b = q[(i + 1) & 3];
+    const dx = b.x - a.x, dy = b.y - a.y, L = Math.hypot(dx, dy);
+    const ux = dx / L, uy = dy / L;
+    sideStart[i] = n;
+    // normale vers l'intérieur ; on ignore 7 % à chaque bout (coins arrondis / cornés)
+    n += segmentBits(G, a.x, a.y, ux, uy, -uy * cw, ux * cw, 0.07 * L, 0.93 * L, Math.max(2, L / 60), 3, n);
+  }
+  sideStart[4] = n;
+  if (!n) return null;
+  const tot = [0, 0, 0, 0];
+  for (let j = 0; j < n; j++) { const f = bits[j]; if (f & 1) tot[0]++; if (f & 2) tot[1]++; if (f & 4) tot[2]++; if (f & 8) tot[3]++; }
+  // un seul sens par canal pour tout le quad : la feuille est plus claire (ou plus
+  // sombre) que ce qui l'entoure sur TOUS ses côtés
+  const gbit = tot[0] >= tot[1] ? 1 : 2;
+  const cbit = tot[2] >= tot[3] ? 4 : 8;
+  const useC = Math.max(tot[2], tot[3]) > 0.3 * n;
+  const mask = gbit | (useC ? cbit : 0);
+  const sides = [];
+  let mean = 0, min = 1;
+  for (let i = 0; i < 4; i++) {
+    let c = 0;
+    const m = sideStart[i + 1] - sideStart[i];
+    for (let j = sideStart[i]; j < sideStart[i + 1]; j++) if (bits[j] & mask) c++;
+    const s = m ? c / m : 0;
+    sides.push(s); mean += s / 4; if (s < min) min = s;
+  }
+  return { mean, min, sides, gbit, cbit, useC, mask };
+}
+
+/* prolongements des côtés au-delà des coins : s'ils sont encore appuyés par un bord,
+   ce coin n'en est pas un (jonction en T). Un côté dont les DEUX voisins le traversent
+   est une ligne intérieure (filet de tableau, jonction de deux tickets, limite d'ombre)
+   ou un joint de carrelage : le quad est alors tronqué / faux.
+   Renvoie { frac, crossed } */
+function quadThrough(q, G, sc) {
+  const w = G.w, h = G.h, bits = G.bits;
+  const cw = quadSignedArea(q) > 0 ? 1 : -1;
+  const len = [0, 1, 2, 3].map(i => Math.hypot(q[(i + 1) & 3].x - q[i].x, q[(i + 1) & 3].y - q[i].y));
+  const endOK = [[false, false], [false, false], [false, false], [false, false]];
+  let n = 0, c = 0;
+  for (let i = 0; i < 4; i++) {
+    const a = q[i], b = q[(i + 1) & 3], L = len[i];
+    const ux = (b.x - a.x) / L, uy = (b.y - a.y) / L, nx = -uy * cw, ny = ux * cw;
+    for (let e = 0; e < 2; e++) {
+      // tolérance latérale : deux tickets empilés n'ont pas exactement la même largeur
+      const rr = Math.min(6, Math.max(3, Math.round(0.05 * len[e ? (i + 1) & 3 : (i + 3) & 3])));
+      // longueur utile du prolongement : jusqu'au bord de l'image au plus
+      const ox = e ? b.x : a.x, oy = e ? b.y : a.y, sx = e ? ux : -ux, sy = e ? uy : -uy;
+      let ext = Math.max(16, 0.2 * L);
+      if (sx > 1e-6) ext = Math.min(ext, (w - 4 - ox) / sx); else if (sx < -1e-6) ext = Math.min(ext, (3 - ox) / sx);
+      if (sy > 1e-6) ext = Math.min(ext, (h - 4 - oy) / sy); else if (sy < -1e-6) ext = Math.min(ext, (3 - oy) / sy);
+      if (ext < 14) continue;
+      const sn = segmentBits(G, ox, oy, sx, sy, nx, ny, 4, ext, 2, rr, 0);
+      let scnt = 0;
+      for (let j = 0; j < sn; j++) if (bits[j] & sc.mask) scnt++;
+      n += sn; c += scnt;
+      endOK[i][e] = sn >= 6 && scnt / sn >= 0.75;
+    }
+  }
+  let crossed = 0;
+  for (let i = 0; i < 4; i++) if (endOK[(i + 3) & 3][1] && endOK[(i + 1) & 3][0]) crossed++;
+  let ends = 0;
+  for (let i = 0; i < 4; i++) ends += (endOK[i][0] ? 1 : 0) + (endOK[i][1] ? 1 : 0);
+  return { frac: n ? c / n : 0, crossed, ends };
+}
+
+/* recale chaque côté sur le bord réel (maximum du gradient le long de la normale),
+   droite ajustée aux moindres carrés avec rejet des points aberrants */
+function quadRefine(q, G, sc) {
+  const w = G.w, h = G.h;
+  const cw = quadSignedArea(q) > 0 ? 1 : -1;
+  const lines = [];
+  for (let i = 0; i < 4; i++) {
+    const a = q[i], b = q[(i + 1) & 3];
+    const dx = b.x - a.x, dy = b.y - a.y, L = Math.hypot(dx, dy);
+    const ux = dx / L, uy = dy / L, nx = -uy * cw, ny = ux * cw;
+    const xs = [], ys = [];
+    const val = (xi, yi) => {
+      const o = yi * w + xi;
+      let v = (sc.gbit === 1 ? 1 : -1) * (G.gx[o] * nx + G.gy[o] * ny) / G.tG;
+      if (sc.useC) { const c = (sc.cbit === 4 ? 1 : -1) * (G.cx[o] * nx + G.cy[o] * ny) / G.tC; if (c > v) v = c; }
+      return v;
+    };
+    for (let t = 0.06 * L; t <= 0.94 * L; t += 1.5) {
+      const px = a.x + ux * t, py = a.y + uy * t;
+      let best = 1, bk = null;
+      const v = [];
+      for (let k = -4; k <= 4; k++) {
+        const xi = Math.round(px + k * nx), yi = Math.round(py + k * ny);
+        v.push((xi < 1 || yi < 1 || xi > w - 2 || yi > h - 2) ? 0 : val(xi, yi));
+      }
+      for (let k = 1; k < 8; k++) if (v[k] > best) { best = v[k]; bk = k; }
+      if (bk === null) continue;
+      // sommet de parabole : position du bord au sous-pixel
+      const den = v[bk - 1] - 2 * v[bk] + v[bk + 1];
+      const sub = den < 0 ? Math.max(-0.5, Math.min(0.5, 0.5 * (v[bk - 1] - v[bk + 1]) / den)) : 0;
+      const k = bk - 4 + sub;
+      // les positions échantillonnées sont arrondies au pixel : on repart du pixel arrondi
+      xs.push(px + k * nx); ys.push(py + k * ny);
+    }
+    let line = { px: a.x, py: a.y, ux, uy };
+    if (xs.length >= Math.max(6, 0.3 * (0.88 * L / 1.5))) {
+      let keep = xs.map(() => true);
+      for (let it = 0; it < 3; it++) {
+        let m = 0, sx = 0, sy = 0;
+        for (let j = 0; j < xs.length; j++) if (keep[j]) { sx += xs[j]; sy += ys[j]; m++; }
+        if (m < 5) break;
+        sx /= m; sy /= m;
+        let sxx = 0, sxy = 0, syy = 0;
+        for (let j = 0; j < xs.length; j++) if (keep[j]) { const ex = xs[j] - sx, ey = ys[j] - sy; sxx += ex * ex; sxy += ex * ey; syy += ey * ey; }
+        const th = 0.5 * Math.atan2(2 * sxy, sxx - syy);
+        let lx = Math.cos(th), ly = Math.sin(th);
+        if (lx * ux + ly * uy < 0) { lx = -lx; ly = -ly; }
+        // garde-fou : la droite ajustée ne doit pas tourner de plus de ~8° par rapport au côté
+        if (lx * ux + ly * uy < 0.99) break;
+        line = { px: sx, py: sy, ux: lx, uy: ly };
+        const tol = it === 0 ? 2.5 : 1.5;
+        for (let j = 0; j < xs.length; j++) keep[j] = Math.abs((xs[j] - sx) * -ly + (ys[j] - sy) * lx) <= tol;
+      }
+    }
+    lines.push(line);
+  }
+  const out = [];
+  for (let i = 0; i < 4; i++) {
+    const p = lineIntersect(lines[(i + 3) & 3], lines[i]);
+    if (!p) return null;
+    out.push(p);
+  }
+  return out;
+}
+
+/* intersection de deux droites { px, py, ux, uy } */
+function lineIntersect(a, b) {
+  const den = a.ux * b.uy - a.uy * b.ux;
+  if (Math.abs(den) < 1e-6) return null;
+  const t = ((b.px - a.px) * b.uy - (b.py - a.py) * b.ux) / den;
+  return { x: a.px + a.ux * t, y: a.py + a.uy * t };
+}
+
+/* regroupe les segments de Hough alignés en droites { px, py, ux, uy, t0, t1, len } */
+function mergeSegments(seg, nSeg, maxLines) {
+  const order = [];
+  for (let i = 0; i < nSeg; i++) order.push(i);
+  const L = (i) => Math.hypot(seg[i * 4 + 2] - seg[i * 4], seg[i * 4 + 3] - seg[i * 4 + 1]);
+  order.sort((a, b) => L(b) - L(a));
+  const lines = [];
+  for (const i of order) {
+    const x1 = seg[i * 4], y1 = seg[i * 4 + 1], x2 = seg[i * 4 + 2], y2 = seg[i * 4 + 3];
+    const len = Math.hypot(x2 - x1, y2 - y1);
+    if (len < 1) continue;
+    let hit = null;
+    for (const ln of lines) {
+      const d1 = (x1 - ln.px) * -ln.uy + (y1 - ln.py) * ln.ux, d2 = (x2 - ln.px) * -ln.uy + (y2 - ln.py) * ln.ux;
+      if (Math.abs(d1) < 2.5 && Math.abs(d2) < 2.5 && Math.abs(d1 - d2) < 0.07 * len + 1.5) { hit = ln; break; }
+    }
+    if (hit) {
+      const t1 = (x1 - hit.px) * hit.ux + (y1 - hit.py) * hit.uy, t2 = (x2 - hit.px) * hit.ux + (y2 - hit.py) * hit.uy;
+      hit.t0 = Math.min(hit.t0, t1, t2); hit.t1 = Math.max(hit.t1, t1, t2); hit.len += len;
+      hit.iv.push([Math.min(t1, t2), Math.max(t1, t2)]);
+    } else {
+      lines.push({ px: x1, py: y1, ux: (x2 - x1) / len, uy: (y2 - y1) / len, t0: 0, t1: len, len, iv: [[0, len]] });
+    }
+  }
+  lines.sort((a, b) => b.len - a.len);
+  return lines.slice(0, maxLines);
+}
+
+/* part du segment [ta, tb] (abscisses sur la droite) couverte par les segments de Hough */
+function lineCover(ln, ta, tb) {
+  if (ta > tb) { const s = ta; ta = tb; tb = s; }
+  const L = tb - ta;
+  if (L <= 0) return 0;
+  let c = 0;
+  for (const iv of ln.iv) { const lo = Math.max(ta, iv[0] - 2), hi = Math.min(tb, iv[1] + 2); if (hi > lo) c += hi - lo; }
+  return Math.min(1, c / L);
+}
+
+/* candidats issus des droites : pour chaque paire de grandes droites « opposées »
+   (les deux longs bords), on cherche les droites transversales qui les relient et on
+   garde les plus extérieures de chaque côté (les lignes de texte / filets sont au milieu) */
+function quadsFromLines(lines, w, h, maxOut) {
+  const minSep = 0.12 * Math.min(w, h);
+  const nMain = Math.min(lines.length, 18);
+  const pairs = [];
+  for (let i = 0; i < nMain; i++) for (let j = i + 1; j < nMain; j++) {
+    const a = lines[i], b = lines[j];
+    if (Math.abs(a.ux * b.uy - a.uy * b.ux) > 0.47) continue;      // > 28° : pas des côtés opposés
+    const mx = b.px + b.ux * (b.t0 + b.t1) / 2, my = b.py + b.uy * (b.t0 + b.t1) / 2;
+    if (Math.abs((mx - a.px) * -a.uy + (my - a.py) * a.ux) < minSep) continue;
+    pairs.push({ a, b, len: a.len + b.len });
+  }
+  pairs.sort((p, q) => q.len - p.len);
+  const out = [];
+  const T = (ln, pt) => (pt.x - ln.px) * ln.ux + (pt.y - ln.py) * ln.uy;
+  for (let p = 0; p < Math.min(pairs.length, 16) && out.length < maxOut; p++) {
+    const A = pairs[p].a, B = pairs[p].b;
+    const sg = A.ux * B.ux + A.uy * B.uy < 0 ? -1 : 1;
+    let ax = A.ux + sg * B.ux, ay = A.uy + sg * B.uy;
+    const al = Math.hypot(ax, ay); ax /= al; ay /= al;
+    const tr = [];
+    for (const C of lines) {
+      if (C === A || C === B) continue;
+      if (Math.abs(ax * C.uy - ay * C.ux) < 0.76) continue;        // < 50° avec l'axe : pas transversale
+      const pa = lineIntersect(A, C), pb = lineIntersect(B, C);
+      if (!pa || !pb) continue;
+      if (lineCover(C, T(C, pa), T(C, pb)) < 0.4) continue;
+      tr.push({ pa, pb, s: ((pa.x + pb.x) * ax + (pa.y + pb.y) * ay) / 2 });
+    }
+    if (tr.length < 2) continue;
+    tr.sort((u, v) => u.s - v.s);
+    const K = Math.min(4, tr.length - 1);
+    for (let i = 0; i < K; i++) for (let j = tr.length - 1; j >= tr.length - K && j > i; j--) {
+      if (tr[j].s - tr[i].s < minSep) continue;
+      const q = [tr[i].pa, tr[i].pb, tr[j].pb, tr[j].pa];
+      if (quadPlausible(q, w, h)) out.push(q);
+    }
+  }
+  return out.slice(0, maxOut);
+}
+
+/* candidats issus des contours d'un masque binaire (régions claires ET sombres) */
+function quadsFromMask(mask, w, h, out, M) {
+  const contours = M(new cv.MatVector());
+  const hier = M(new cv.Mat());
+  cv.findContours(mask, contours, hier, cv.RETR_LIST, cv.CHAIN_APPROX_SIMPLE);
+  const minA = DET_MIN_AREA * w * h * 0.8, maxA = DET_MAX_AREA * w * h;
+  const nC = contours.size();
+  for (let i = 0; i < nC; i++) {
+    const cnt = contours.get(i);
+    let hull = null;
+    try {
+      if (cnt.rows < 4) continue;
+      const r = cv.boundingRect(cnt);
+      if (r.width * r.height < minA) continue;
+      hull = new cv.Mat();
+      cv.convexHull(cnt, hull);
+      const area = Math.abs(cv.contourArea(hull));
+      if (area < minA || area > maxA) continue;
+      const peri = cv.arcLength(hull, true);
+      for (const eps of [0.015, 0.03, 0.06]) {
+        const ap = new cv.Mat();
+        try {
+          cv.approxPolyDP(hull, ap, eps * peri, true);
+          if (ap.rows === 4) {
+            const q = [];
+            for (let j = 0; j < 4; j++) q.push({ x: ap.data32S[j * 2], y: ap.data32S[j * 2 + 1] });
+            if (quadPlausible(q, w, h)) out.push(q);
+          }
+        } finally { ap.delete(); }
+      }
+      // rectangle orienté minimal (feuille aux bords irréguliers / gondolés)
+      const rr = cv.minAreaRect(hull);
+      const a = rr.angle * Math.PI / 180, co = Math.cos(a), si = Math.sin(a);
+      const q = [[-1, -1], [1, -1], [1, 1], [-1, 1]].map(([ox, oy]) => ({
+        x: rr.center.x + (ox * rr.size.width / 2) * co - (oy * rr.size.height / 2) * si,
+        y: rr.center.y + (ox * rr.size.width / 2) * si + (oy * rr.size.height / 2) * co,
+      }));
+      if (quadPlausible(q, w, h)) out.push(q);
+    } finally {
+      if (hull) hull.delete();
+      cnt.delete();
+    }
+  }
+}
+
+/* seuil de bruit d'une carte de gradient : médiane de |gx|+|gy| (échantillonnée) */
+function gradNoise(gx, gy, n) {
+  const hist = new Uint32Array(512);
+  let m = 0;
+  for (let i = 0; i < n; i += 7) { let v = Math.abs(gx[i]) + Math.abs(gy[i]); if (v > 511) v = 511; hist[v]++; m++; }
+  let acc = 0, med = 0, p90 = 0;
+  for (let v = 0; v < 512; v++) { acc += hist[v]; if (!med && acc >= m * 0.5) med = v; if (acc >= m * 0.9) { p90 = v; break; } }
+  return { med, p90 };
+}
+
+/* renvoie le quadrilatère détecté (ordonné TL,TR,BR,BL, en pixels du canvas) ou null */
+function detectQuad(canvas) {
+  if (!cvReady) return null;
+  const trash = [];
+  const M = (m) => { trash.push(m); return m; };
   try {
     const src = M(cv.imread(canvas));
+    const k = Math.min(1, DET_WORK / Math.max(src.cols, src.rows));
+    const w = Math.max(8, Math.round(src.cols * k)), h = Math.max(8, Math.round(src.rows * k));
+    const small = M(new cv.Mat());
+    if (k < 1) cv.resize(src, small, new cv.Size(w, h), 0, 0, cv.INTER_AREA); else src.copyTo(small);
+
+    // --- canaux : luminance + « couleur » (max - min des 3 canaux : feuille blanche sur nappe colorée)
     const gray = M(new cv.Mat());
-    cv.cvtColor(src, gray, cv.COLOR_RGBA2GRAY);
-    cv.GaussianBlur(gray, gray, new cv.Size(5, 5), 0);
+    cv.cvtColor(small, gray, cv.COLOR_RGBA2GRAY);
+    const planes = M(new cv.MatVector());
+    cv.split(small, planes);
+    const pr = M(planes.get(0)), pg = M(planes.get(1)), pb = M(planes.get(2));
+    const mx = M(new cv.Mat()), mn = M(new cv.Mat()), chroma = M(new cv.Mat());
+    cv.max(pr, pg, mx); cv.max(mx, pb, mx);
+    cv.min(pr, pg, mn); cv.min(mn, pb, mn);
+    cv.subtract(mx, mn, chroma);
+    cv.GaussianBlur(chroma, chroma, new cv.Size(5, 5), 0);
 
-    // Méthode A : Otsu + fermeture 7×7 (bouche les trous dus au texte / QR codes)
-    const kA = M(cv.Mat.ones(7, 7, cv.CV_8U));
-    const thA = M(new cv.Mat());
-    cv.threshold(gray, thA, 0, 255, cv.THRESH_BINARY + cv.THRESH_OTSU);
-    const closedA = M(new cv.Mat());
-    cv.morphologyEx(thA, closedA, cv.MORPH_CLOSE, kA);
-    let best = bestQuadFromMask(closedA);
+    // --- luminance : version douce (garde les fines ombres) et version « sans texte »
+    const g1 = M(new cv.Mat());
+    cv.GaussianBlur(gray, g1, new cv.Size(3, 3), 0);
+    const k5 = M(cv.Mat.ones(5, 5, cv.CV_8U)), k3 = M(cv.Mat.ones(3, 3, cv.CV_8U));
+    const gc = M(new cv.Mat());
+    cv.morphologyEx(gray, gc, cv.MORPH_CLOSE, k5);   // fermeture : efface le texte sombre
+    cv.GaussianBlur(gc, gc, new cv.Size(5, 5), 0);
 
-    // Méthode A-bis : polarité inverse (document sombre sur fond clair)
-    if (!best) {
-      const thAi = M(new cv.Mat());
-      cv.threshold(gray, thAi, 0, 255, cv.THRESH_BINARY_INV + cv.THRESH_OTSU);
-      const closedAi = M(new cv.Mat());
-      cv.morphologyEx(thAi, closedAi, cv.MORPH_CLOSE, kA);
-      best = bestQuadFromMask(closedAi);
+    // --- gradients (Sobel 3×3, 16 bits signés)
+    const gx = M(new cv.Mat()), gy = M(new cv.Mat()), cxm = M(new cv.Mat()), cym = M(new cv.Mat());
+    cv.Sobel(g1, gx, cv.CV_16S, 1, 0, 3); cv.Sobel(g1, gy, cv.CV_16S, 0, 1, 3);
+    cv.Sobel(chroma, cxm, cv.CV_16S, 1, 0, 3); cv.Sobel(chroma, cym, cv.CV_16S, 0, 1, 3);
+
+    // --- cartes de bords
+    const nzG = gradNoise(gx.data16S, gy.data16S, w * h);
+    const nzC = gradNoise(cxm.data16S, cym.data16S, w * h);
+    const hiG = Math.max(24, Math.min(90, 2.2 * nzG.med + 14));
+    const e1 = M(new cv.Mat()), e2 = M(new cv.Mat()), e3 = M(new cv.Mat());
+    cv.Canny(gc, e1, hiG * 0.4, hiG);                // bords francs, texte effacé
+    cv.Canny(g1, e2, hiG * 0.4, hiG);                // tout, y compris ombres fines
+    const hiC = Math.max(30, Math.min(120, 3 * nzC.med + 20));
+    cv.Canny(chroma, e3, hiC * 0.4, hiC);
+    const edges = M(new cv.Mat());
+    cv.bitwise_or(e1, e2, edges); cv.bitwise_or(edges, e3, edges);
+
+    // --- candidats A : contours de masques
+    const cands = [];
+    const m1 = M(new cv.Mat());
+    cv.threshold(gc, m1, 0, 255, cv.THRESH_BINARY + cv.THRESH_OTSU);
+    cv.morphologyEx(m1, m1, cv.MORPH_OPEN, k5);
+    quadsFromMask(m1, w, h, cands, M);
+    const m2 = M(new cv.Mat());
+    cv.threshold(chroma, m2, 0, 255, cv.THRESH_BINARY + cv.THRESH_OTSU);
+    cv.morphologyEx(m2, m2, cv.MORPH_OPEN, k5);
+    quadsFromMask(m2, w, h, cands, M);
+    // régions fermées par des bords (feuille blanche sur table blanche : seule l'ombre la délimite)
+    const m3 = M(new cv.Mat());
+    cv.bitwise_or(e1, e3, m3);
+    cv.dilate(m3, m3, k3);
+    cv.bitwise_not(m3, m3);
+    quadsFromMask(m3, w, h, cands, M);
+    const m4 = M(new cv.Mat());
+    cv.dilate(edges, m4, k3);
+    cv.bitwise_not(m4, m4);
+    quadsFromMask(m4, w, h, cands, M);
+
+    // --- candidats B : droites de Hough combinées en quadrilatères
+    const segs = M(new cv.Mat());
+    const minLen = Math.round(0.10 * Math.min(w, h));
+    cv.HoughLinesP(edges, segs, 1, Math.PI / 180, 22, minLen, 4);
+    const lines = mergeSegments(segs.data32S, segs.rows, 90);
+    for (const q of quadsFromLines(lines, w, h, 220)) cands.push(q);
+
+    // --- notation de tous les candidats (JS pur, plus aucune allocation OpenCV d'ici la fin)
+    const G = {
+      w, h, gx: gx.data16S, gy: gy.data16S, cx: cxm.data16S, cy: cym.data16S,
+      tG: Math.max(14, 2.5 * nzG.med), tC: Math.max(18, 3 * nzC.med + 8), bits: new Uint8Array(1024), pk: new Int8Array(4096),
+    };
+    const evalQuad = (q) => {
+      if (!quadPlausible(q, w, h)) return null;
+      const s = quadScore(q, G);
+      if (!s) return null;
+      let strong = 0;
+      for (const v of s.sides) if (v >= 0.55) strong++;
+      if (s.mean < 0.5 || s.min < 0.25 || strong < 3) return null;
+      const th = quadThrough(q, G, s);
+      const area = Math.abs(quadSignedArea(q)) / (w * h);
+      s.through = th;
+      s.area = area;
+      if (th.crossed) return null;
+      s.score = s.mean * (0.6 + 0.4 * s.min) * (1 - 0.3 * th.frac);
+      // un côté qui continue au-delà d'un coin = document probablement tronqué : on n'accepte
+      // qu'un seul cas, et seulement si tout le reste est très net ; sinon mieux vaut null
+      if (th.ends >= 2 || (th.ends === 1 && s.score < DET_STRICT)) return null;
+      s.rank = s.score * area;   // à preuve égale, le plus grand : évite de s'arrêter sur une ligne imprimée
+      s.q = q;
+      return s;
+    };
+    const scored = [];
+    for (const q of cands) { const s = evalQuad(q); if (s) scored.push(s); }
+    if (!scored.length) return null;
+    scored.sort((a, b) => b.rank - a.rank);
+    // recalage des meilleurs, puis choix final
+    let best = null;
+    for (let i = 0; i < Math.min(6, scored.length); i++) {
+      let s = scored[i];
+      for (let it = 0; it < 2; it++) {
+        const r = quadRefine(s.q, G, s);
+        if (!r) break;
+        const s2 = evalQuad(r);
+        if (!s2 || s2.score < s.score - 0.02) break;
+        s = s2;
+      }
+      if (!best || s.rank > best.rank) best = s;
     }
-
-    // Méthode B : Canny à seuils adaptatifs (médiane pixels)
-    if (!best) {
-      const data = gray.data;
-      const step = Math.max(1, Math.floor(data.length / 1000));
-      const sample = [];
-      for (let i = 0; i < data.length; i += step) sample.push(data[i]);
-      sample.sort((a, b) => a - b);
-      const med = sample[Math.floor(sample.length / 2)];
-      const lo = Math.max(0, 0.66 * med), hi = Math.min(255, 1.33 * med);
-      const edges = M(new cv.Mat());
-      cv.Canny(gray, edges, lo, hi);
-      const kB = M(cv.Mat.ones(5, 5, cv.CV_8U));
-      cv.dilate(edges, edges, kB);
-      best = bestQuadFromMask(edges);
-    }
-
-    return best ? orderCorners(best) : null;
+    if (best.score < DET_ACCEPT) return null;
+    return orderCorners(best.q.map(p => ({ x: p.x / k, y: p.y / k })));
   } catch (err) {
     console.warn('Détection échouée', err);
     return null;
@@ -1111,8 +1610,6 @@ function orderCorners(pts) {
   const byDiff = [...pts].sort((a, b) => (a.y - a.x) - (b.y - b.x));
   const tr = byDiff[0], bl = byDiff[3];
   if (new Set([tl, tr, br, bl]).size === 4) return [tl, tr, br, bl];
-  // égalité (document penché pile à 45°) : tri dans le sens horaire autour du
-  // centre, en partant du point le plus en haut à gauche
   const cx = pts.reduce((s, p) => s + p.x, 0) / 4, cy = pts.reduce((s, p) => s + p.y, 0) / 4;
   const cw = [...pts].sort((a, b) => Math.atan2(a.y - cy, a.x - cx) - Math.atan2(b.y - cy, b.x - cx));
   const i0 = cw.indexOf(tl);
@@ -1132,6 +1629,7 @@ function openEditor(state) {
   closeEditor();
   editState = state;
   if (typeof editState.darkness !== 'number') editState.darkness = 50;
+  $('capInfo').textContent = editState.info || '';
   show('editor');
   $('livePreviewToggle').checked = livePreview;
   updateFilterUI();
