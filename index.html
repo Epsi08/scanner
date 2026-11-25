@@ -682,7 +682,7 @@ async function processImageFile(file) {
     await ensureCv();
     showLoader('Détection des bords…');
     const corners = detectCorners(baseCanvas);
-    openEditor({ base: baseCanvas, corners, rotation: 0, filter: 'bw', darkness: 58, pageIndex: null });
+    openEditor({ base: baseCanvas, corners, rotation: 0, filter: 'bw', darkness: 50, pageIndex: null });
   } catch (err) {
     console.error(err);
     toast('Impossible de lire cette image.');
@@ -894,7 +894,7 @@ $('camShoot').addEventListener('click', async () => {
     if (photo && base !== photo) releaseCanvas(photo);
     releaseCanvas(frame);
     hideLoader();
-    openEditor({ base, corners, rotation: 0, filter: 'bw', darkness: 58, pageIndex: null });
+    openEditor({ base, corners, rotation: 0, filter: 'bw', darkness: 50, pageIndex: null });
   } catch (err) {
     console.error(err); stopCamera(); hideLoader(); toast('Erreur de capture.');
     show('home'); refreshHome();
@@ -1171,7 +1171,7 @@ function closeEditor() {
 function buildDisplayCanvas() {
   const rc = editRotated(editState);
   // copie réduite pour l'affichage (la loupe, elle, lit la pleine résolution)
-  const maxSide = livePreview ? 1100 : 1800;
+  const maxSide = 1800;   // à 1100 px le petit texte d'un ticket n'est lisible avec aucun réglage
   const scale = Math.min(1, maxSide / Math.max(rc.width, rc.height));
   const pc = document.createElement('canvas');
   pc.width = Math.round(rc.width * scale);
@@ -1557,65 +1557,109 @@ function applyFilter(canvas, filter, darkness) {
   return grayJs(canvas, false); // repli si OpenCV non chargé
 }
 
-/* Étape LOURDE (à ne calculer qu'une fois par image) : normalisation du fond
-   par division -> papier blanc uniforme, ombres/éclairage inégal effacés.
-   Renvoie un cv.Mat à libérer par l'appelant. */
+/* Étape LOURDE (à ne calculer qu'une fois par image) : carte d'encre normalisée.
+   1) fond du papier par fermeture morphologique sur une copie réduite ET lissée
+      (sans le lissage, la fermeture suit les pics du bruit et le papier sort gris) ;
+   2) division -> absorbance (0 = papier, 255 = noir), ombres et éclairage effacés ;
+   3) égalisation de l'encre : chaque trait est rapporté à la crête d'encre la plus
+      proche (max local à l'échelle du trait), avec un plancher lié à l'encre du
+      voisinage et au bruit mesuré -> un ticket thermique pâle sort aussi noir
+      qu'une impression laser, sans faire monter le grain du papier.
+   Pas de médian ni de flou sur le trait lui-même : les traits fins restent entiers.
+   Renvoie un cv.Mat 8 bits (0 = papier, 255 = encre pleine) à libérer par l'appelant. */
 function bwComputeNorm(canvas) {
   return withMats((M) => {
-  const src = M(cv.imread(canvas));
+  const odd = (k) => { k = Math.round(k); return k % 2 === 0 ? k + 1 : k; };
+  // deux moyennes glissantes = quasi-gaussien (sigma = n/2,45), 10 à 30x plus rapide ici
+  const soften = (m, n) => { const s = new cv.Size(n, n); cv.blur(m, m, s); cv.blur(m, m, s); };
   const gray = M(new cv.Mat());
-  cv.cvtColor(src, gray, cv.COLOR_RGBA2GRAY);
-  // débruitage : supprime le grain du papier/capteur -> fond lisse façon Genius,
-  // en préservant les bords du texte (médian 3, sans étaler les fins traits).
-  cv.medianBlur(gray, gray, 3);
+  withMats((T) => {            // l'image RGBA (4x plus lourde) est libérée tout de suite
+    const src = T(cv.imread(canvas));
+    cv.cvtColor(src, gray, cv.COLOR_RGBA2GRAY);
+  });
+  const w = gray.cols, h = gray.rows;
 
-  const maxBg = 1400;
-  const scale = Math.min(1, maxBg / Math.max(gray.cols, gray.rows));
-  const sw = Math.max(1, Math.round(gray.cols * scale));
-  const sh = Math.max(1, Math.round(gray.rows * scale));
-  const work = M(new cv.Mat());
-  if (scale < 1) cv.resize(gray, work, new cv.Size(sw, sh), 0, 0, cv.INTER_AREA);
-  else gray.copyTo(work);
-  let ks = Math.round(Math.max(sw, sh) / 40); if (ks % 2 === 0) ks++; if (ks < 15) ks = 15;
-  // noyau rectangulaire : séparable, ~20x plus rapide que l'ellipse, rendu identique
-  const kernel = M(cv.getStructuringElement(cv.MORPH_RECT, new cv.Size(ks, ks)));
-  cv.morphologyEx(work, work, cv.MORPH_CLOSE, kernel);
-  cv.GaussianBlur(work, work, new cv.Size(ks, ks), 0);
-  const bg = M(new cv.Mat());
-  if (scale < 1) cv.resize(work, bg, new cv.Size(gray.cols, gray.rows), 0, 0, cv.INTER_LINEAR);
-  else work.copyTo(bg);
+  // --- fond du papier, sur une copie réduite (<= 1400 px)
+  const scale = Math.min(1, 1400 / Math.max(w, h));
+  const sw = Math.max(1, Math.round(w * scale));
+  const sh = Math.max(1, Math.round(h * scale));
+  const small = M(new cv.Mat());
+  if (scale < 1) cv.resize(gray, small, new cv.Size(sw, sh), 0, 0, cv.INTER_AREA);
+  else gray.copyTo(small);
+  const ks = Math.max(15, odd(Math.max(sw, sh) / 40));
+  soften(small, 5);
+  // noyau rectangulaire : séparable, bien plus rapide que l'ellipse
+  const kBg = M(cv.getStructuringElement(cv.MORPH_RECT, new cv.Size(ks, ks)));
+  cv.morphologyEx(small, small, cv.MORPH_CLOSE, kBg);
+  soften(small, odd(ks * 0.4));
+  const big = M(new cv.Mat());   // fond à pleine taille, réutilisé plus bas
+  if (scale < 1) cv.resize(small, big, new cv.Size(w, h), 0, 0, cv.INTER_LINEAR);
+  else small.copyTo(big);
 
-  const norm = new cv.Mat();   // rendu à l'appelant : pas dans la corbeille
-  try { cv.divide(gray, bg, norm, 255); } catch (err) { norm.delete(); throw err; }
+  // --- absorbance : 0 = papier, 255 = noir (sur place dans gray)
+  cv.divide(gray, big, gray, 255);
+  cv.bitwise_not(gray, gray);
+  const ab = gray;
+  const a1 = M(new cv.Mat());    // version à peine lissée, pour les mesures seulement
+  cv.GaussianBlur(ab, a1, new cv.Size(5, 5), 0.8, 0.8, cv.BORDER_DEFAULT);
+
+  // --- niveau de bruit (résidu haute fréquence, écrêté pour ignorer les bords de lettres)
+  cv.absdiff(ab, a1, big);
+  cv.threshold(big, big, 24, 0, cv.THRESH_TRUNC);
+  const floor = Math.round(Math.min(255, Math.max(44, 20 * cv.mean(big)[0])));
+
+  // --- force d'encre du voisinage (copie réduite) : max local large, adouci
+  if (scale < 1) cv.resize(a1, small, new cv.Size(sw, sh), 0, 0, cv.INTER_AREA);
+  else a1.copyTo(small);
+  const k2 = Math.max(9, odd(Math.max(sw, sh) / 28));
+  const kInk = M(cv.getStructuringElement(cv.MORPH_RECT, new cv.Size(k2, k2)));
+  cv.dilate(small, small, kInk);
+  soften(small, odd(k2 * 0.6));
+  cv.convertScaleAbs(small, small, 0.85, 0);
+  const flo = M(new cv.Mat(small.rows, small.cols, cv.CV_8UC1, new cv.Scalar(floor)));
+  cv.max(small, flo, small);     // plancher : le grain d'une zone vide n'est jamais amplifié
+  if (scale < 1) cv.resize(small, big, new cv.Size(w, h), 0, 0, cv.INTER_LINEAR);
+  else small.copyTo(big);
+
+  // --- crête d'encre à l'échelle du trait (pleine résolution)
+  const k1 = Math.max(3, odd(Math.max(w, h) / 250));
+  const kStroke = M(cv.getStructuringElement(cv.MORPH_RECT, new cv.Size(k1, k1)));
+  cv.dilate(a1, a1, kStroke);
+  cv.blur(a1, a1, new cv.Size(k1, k1));
+  cv.max(a1, big, big);
+
+  const norm = new cv.Mat();     // rendu à l'appelant : pas dans la corbeille
+  try { cv.divide(ab, big, norm, 255); } catch (err) { norm.delete(); throw err; }
   return norm;
   });
 }
 
-/* Étape LÉGÈRE (recalculée à chaque geste du curseur) : courbe de niveaux
-   pilotée par darkness + léger renforcement de netteté. */
+/* Étape LÉGÈRE (recalculée à chaque geste du curseur) : une simple table de
+   niveaux sur la carte d'encre. darkness 0..100, monotone : plus on monte, plus
+   les seuils descendent -> traits plus épais et plus noirs. 50 = réglage mesuré. */
 function bwApplyLevels(normMat, outWidth, outHeight, darkness) {
-  const d = (typeof darkness === 'number') ? darkness : 50;
-  const Bp = 75 + (d / 100) * 100;   // point noir : 75 -> 175
-  const Wp = 215 - (d / 100) * 25;   // point blanc : 215 -> 190 (fond forcé blanc)
+  let d = (typeof darkness === 'number') ? darkness : 50;
+  d = Math.min(100, Math.max(0, d)) / 100;
+  // (seuil blanc, seuil noir) en fraction de l'encre locale : clair / défaut / foncé
+  const P = [[0.45, 1.25], [0.25, 0.90], [0.12, 0.60]];
+  const a = d <= 0.5 ? P[0] : P[1], b = d <= 0.5 ? P[1] : P[2];
+  const u = d <= 0.5 ? d * 2 : d * 2 - 1;
+  const lo = a[0] + (b[0] - a[0]) * u;
+  const hi = a[1] + (b[1] - a[1]) * u;
   return withMats((M) => {
   const lut = M(new cv.Mat(1, 256, cv.CV_8U));
   const ld = lut.data;
   for (let i = 0; i < 256; i++) {
-    let v = (i - Bp) / (Wp - Bp);
+    let v = (i / 255 - lo) / (hi - lo);
     v = v < 0 ? 0 : v > 1 ? 1 : v;
-    ld[i] = Math.round(v * 255);
+    ld[i] = 255 - Math.round(v * 255);
   }
   const out8 = M(new cv.Mat());
   cv.LUT(normMat, lut, out8);
 
-  const blurS = M(new cv.Mat());
-  cv.GaussianBlur(out8, blurS, new cv.Size(0, 0), 0.8);
-  const sharp = M(new cv.Mat());
-  cv.addWeighted(out8, 1.6, blurS, -0.6, 0, sharp);
-
   const out = document.createElement('canvas');
   out.width = outWidth; out.height = outHeight;
-  cv.imshow(out, sharp);
+  cv.imshow(out, out8);
   return out;
   });
 }
