@@ -229,48 +229,9 @@
   #viewerPrev { left: 8px; } #viewerNext { right: 8px; }
   .viewer-nav.hidden { display: none; }
 
-  /* ---------- CAMÉRA LIVE ---------- */
-  #camera { background: #000; }
-  #camVideo {
-    position: absolute; inset: 0; width: 100%; height: 100%;
-    object-fit: contain; background: #000;
-  }
-  #camOverlay { position: absolute; inset: 0; width: 100%; height: 100%; pointer-events: none; }
-  .cam-top {
-    position: absolute; top: 0; left: 0; right: 0;
-    padding-top: calc(var(--safe-top) + 10px);
-    display: flex; align-items: center; gap: 12px;
-    padding-left: 14px; padding-right: 14px; padding-bottom: 10px;
-    background: linear-gradient(rgba(0,0,0,.55), rgba(0,0,0,0));
-    z-index: 3;
-  }
-  .cam-top .iconbtn { color: #fff; background: rgba(255,255,255,.15); }
-  .cam-hint { color: #fff; font-size: 14px; font-weight: 500; }
-  .cam-hint.locked { color: #34C759; }
-  .cam-res {
-    margin-left: auto; color: #fff; font-size: 12px; font-weight: 600;
-    background: rgba(255,255,255,.15); padding: 3px 9px; border-radius: 10px;
-  }
-  .cam-res:empty { display: none; }
+  /* source et résolution de la photo, sous le titre de l'éditeur */
   .cap-info { display: block; font-size: 11px; font-weight: 400; color: #9a9a9a; text-align: center; }
   .cap-info:empty { display: none; }
-  .cam-bottom {
-    position: absolute; left: 0; right: 0; bottom: 0;
-    padding-bottom: calc(var(--safe-bottom) + 28px); padding-top: 20px;
-    display: flex; align-items: center; justify-content: center;
-    background: linear-gradient(rgba(0,0,0,0), rgba(0,0,0,.55));
-    z-index: 3;
-  }
-  .shutter {
-    width: 74px; height: 74px; border-radius: 50%;
-    border: 4px solid #fff; background: transparent;
-    display: flex; align-items: center; justify-content: center;
-  }
-  .shutter span {
-    width: 58px; height: 58px; border-radius: 50%; background: #fff;
-    transition: transform .1s;
-  }
-  .shutter:active span { transform: scale(.88); }
 
   /* ---------- Feuille d'export ---------- */
   .sheet-backdrop {
@@ -462,23 +423,7 @@
   </div>
 </section>
 
-<!-- =================== CAMÉRA LIVE =================== -->
-<section id="camera" class="screen hidden">
-  <video id="camVideo" playsinline muted autoplay></video>
-  <canvas id="camOverlay"></canvas>
-  <div class="cam-top">
-    <button class="iconbtn" id="camCancel" aria-label="Fermer">
-      <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M18 6 6 18M6 6l12 12"/></svg>
-    </button>
-    <span id="camHint" class="cam-hint">Recherche du document…</span>
-    <span id="camRes" class="cam-res"></span>
-  </div>
-  <div class="cam-bottom">
-    <button id="camShoot" class="shutter" aria-label="Capturer"><span></span></button>
-  </div>
-</section>
-
-<!-- inputs : repli prise de photo (capture) + photothèque (sans capture) -->
+<!-- inputs : appareil photo de l'iPhone (capture) + photothèque (sans capture) -->
 <input type="file" id="cameraInput" accept="image/*" capture="environment" class="hidden">
 <input type="file" id="libraryInput" accept="image/*" class="hidden">
 
@@ -577,7 +522,6 @@ function toast(msg) {
 function show(screen) {
   $('home').classList.toggle('hidden', screen !== 'home');
   $('editor').classList.toggle('hidden', screen !== 'editor');
-  $('camera').classList.toggle('hidden', screen !== 'camera');
   $('viewer').classList.toggle('hidden', screen !== 'viewer');
 }
 
@@ -629,7 +573,6 @@ function refreshHome() {
 /* ============================================================
    Capture caméra
    ============================================================ */
-let addingPage = false;
 $('fabScan').addEventListener('click', () => openSourceSheet());
 $('addPagesBtn').addEventListener('click', () => openSourceSheet());
 $('newDocBtn').addEventListener('click', () => {
@@ -663,28 +606,31 @@ function openSourceSheet() {
   bd.addEventListener('click', () => bd.remove());
   document.body.appendChild(bd);
   $('srcCancel').addEventListener('click', () => bd.remove());
-  $('srcScan').addEventListener('click', () => { bd.remove(); startLiveCamera(); });
+  // appareil photo de l'iPhone : aucune autorisation à donner, photo pleine résolution
+  $('srcScan').addEventListener('click', () => { bd.remove(); triggerInput('cameraInput'); });
   $('srcLibrary').addEventListener('click', () => { bd.remove(); triggerInput('libraryInput'); });
 }
 
 function triggerInput(id) {
-  addingPage = pages.length > 0;
   const input = $(id);
   input.value = '';
   input.click();
 }
 
-async function processImageFile(file) {
+const mpText = (mp) => mp.toFixed(1).replace('.', ',') + ' MP';
+
+async function processImageFile(file, source) {
   if (!file) return;
   showLoader('Lecture de la photo…');
   try {
     const bmp = await loadBitmap(file);
+    const info = source + ' ' + mpText(bmp.width * bmp.height / 1e6);
     const baseCanvas = bitmapToCanvas(bmp, MAX_SIDE);
     freeBitmap(bmp);
     await ensureCv();
     showLoader('Détection des bords…');
     const corners = detectCorners(baseCanvas);
-    openEditor({ base: baseCanvas, corners, rotation: 0, filter: 'bw', darkness: 50, pageIndex: null });
+    openEditor({ base: baseCanvas, corners, rotation: 0, filter: 'bw', darkness: 50, pageIndex: null, info });
   } catch (err) {
     console.error(err);
     toast('Impossible de lire cette image.');
@@ -693,349 +639,11 @@ async function processImageFile(file) {
   }
 }
 
-$('cameraInput').addEventListener('change', (e) => processImageFile(e.target.files && e.target.files[0]));
-$('libraryInput').addEventListener('change', (e) => processImageFile(e.target.files && e.target.files[0]));
-
-/* ============================================================
-   CAMÉRA LIVE — détection du document en temps réel + capture
-   ============================================================ */
-let camStream = null, camRAF = null;
-let camLastQuad = null;        // dernier quad lissé (espace canvas de détection)
-let camDetScale = 1;          // facteur canvas détection -> pixels vidéo
-let camFrameCount = 0;        // compteur de frames rAF pour le skip
-let camQuadHistory = [];      // historique des N derniers quads détectés (lissage)
-let camLastHitTime = 0;       // dernière détection réussie (expiration du cadre)
-const CAM_QUAD_TTL = 1500;    // ms sans détection avant de retirer le cadre
-const camDet = document.createElement('canvas');
-
-let camStarting = false;
-async function startLiveCamera() {
-  if (camStarting || camStream) return;   // double appui : une seule caméra
-  camStarting = true;
-  try { await openLiveCamera(); } finally { camStarting = false; }
-}
-
-async function openLiveCamera() {
-  addingPage = pages.length > 0;
-  if (!navigator.mediaDevices || !navigator.mediaDevices.getUserMedia) {
-    return triggerInput('cameraInput'); // repli prise de photo
-  }
-  try {
-    camStream = await navigator.mediaDevices.getUserMedia({
-      // format 12 MP 4:3 du capteur si l'iPhone l'offre (sinon le plus proche) : il fixe aussi
-      // la taille de la photo. Pas de frameRate : en imposer un peut écarter ce format.
-      video: { facingMode: { ideal: 'environment' }, width: { ideal: 4032 }, height: { ideal: 3024 } },
-      audio: false,
-    });
-  } catch (err) {
-    console.warn('Caméra live indisponible, repli photo', err);
-    toast('Caméra live indisponible — mode photo.');
-    return triggerInput('cameraInput');
-  }
-  const v = $('camVideo');
-  v.srcObject = camStream;
-  camLastQuad = null;
-  camQuadHistory = [];
-  camFrameCount = 0;
-  camNextDet = 0;
-  camPending = null;
-  camLastHitTime = 0;
-  $('camRes').textContent = '';
-  show('camera');
-  $('camHint').textContent = 'Recherche du document…';
-  $('camHint').classList.remove('locked');
-  try { await v.play(); } catch (_) {}
-  const begin = () => {
-    v.onloadedmetadata = null;
-    if (camRAF || !camStream) return;   // déjà lancée (ancien handler resté accroché)
-    resizeOverlay();
-    // résolution réelle du flux : 12,2 MP = plein capteur ; 8,3 = 4K ; 2,1 = limité au 1080p
-    const mp = v.videoWidth * v.videoHeight / 1e6;
-    $('camRes').textContent = mp ? mp.toFixed(1).replace('.', ',') + ' MP' : '';
-    camLoop();
-  };
-  if (v.videoWidth) begin(); else v.onloadedmetadata = begin;
-}
-
-function resizeOverlay() {
-  const ov = $('camOverlay');
-  ov.width = ov.clientWidth; ov.height = ov.clientHeight;
-}
-
-/* rect d'affichage de la vidéo (object-fit: contain) */
-function videoDisplayRect() {
-  const v = $('camVideo'), ov = $('camOverlay');
-  const cw = ov.width, ch = ov.height, vw = v.videoWidth, vh = v.videoHeight;
-  if (!vw || !vh) return { offX: 0, offY: 0, scaleFromVideo: 1 };
-  const vAR = vw / vh, cAR = cw / ch;
-  let dispW, dispH;
-  if (vAR > cAR) { dispW = cw; dispH = cw / vAR; } else { dispH = ch; dispW = ch * vAR; }
-  return { offX: (cw - dispW) / 2, offY: (ch - dispH) / 2, scaleFromVideo: dispW / vw };
-}
-
-function smoothQuad(history) {
-  if (history.length <= 1) return history[0] || null;
-  return history[0].map((_, i) => ({
-    x: history.reduce((s, q) => s + q[i].x, 0) / history.length,
-    y: history.reduce((s, q) => s + q[i].y, 0) / history.length,
-  }));
-}
-
-/* garde-fou : une détection isolée qui saute loin du cadre affiché doit être
-   confirmée par la suivante (un cadre faux sur une seule image n'apparaît jamais) */
-let camPending = null;         // détection en attente de confirmation
-/* écart maxi entre coins de deux quads, en fraction de la largeur de détection */
-function quadJump(a, b, w) {
-  let m = 0;
-  for (let i = 0; i < 4; i++) m = Math.max(m, Math.hypot(a[i].x - b[i].x, a[i].y - b[i].y));
-  return m / w;
-}
-/* à appeler dans camLoop à la place du traitement direct de q ; renvoie le quad à
-   utiliser (ou null si la détection doit encore être confirmée) */
-function camGate(q, detW) {
-  if (!q) { camPending = null; return null; }
-  // proche du cadre déjà affiché : on accepte directement
-  if (camLastQuad && quadJump(q, camLastQuad, detW) < 0.06) { camPending = null; return q; }
-  // sinon : accepté seulement si la détection précédente disait la même chose
-  if (camPending && quadJump(q, camPending, detW) < 0.06) { camPending = null; camQuadHistory = []; return q; }
-  camPending = q;
-  return null;
-}
-
-let camNextDet = 0;            // pas de détection avant cet instant (ms)
-function camLoop() {
-  if (!camStream) return;
-  const v = $('camVideo');
-  camFrameCount++;
-  if (cvReady && v.videoWidth && camFrameCount % 4 === 0 && performance.now() >= camNextDet) {
-    const tDet = performance.now();
-    const detW = 480, detH = Math.round(detW * v.videoHeight / v.videoWidth);
-    camDet.width = detW; camDet.height = detH;
-    camDet.getContext('2d').drawImage(v, 0, 0, detW, detH);
-    camDetScale = v.videoWidth / detW;
-    const q = camGate(detectQuad(camDet), detW);
-    // téléphone lent : la détection n'occupe jamais plus d'un tiers du temps
-    camNextDet = performance.now() + 2 * (performance.now() - tDet);
-    if (q) {
-      // trou de plus de 400 ms : le téléphone a bougé, on repart d'un historique neuf
-      if (performance.now() - camLastHitTime > 400) camQuadHistory = [];
-      camQuadHistory.push(q);
-      if (camQuadHistory.length > 5) camQuadHistory.shift();
-      camLastQuad = smoothQuad(camQuadHistory);
-      camLastHitTime = performance.now();
-    } else if (camLastQuad && performance.now() - camLastHitTime > CAM_QUAD_TTL) {
-      // plus rien depuis un moment : le cadre ne correspond plus à la scène
-      camLastQuad = null;
-      camQuadHistory = [];
-    }
-    // sinon : on garde le dernier cadre valide (stabilité entre deux frames)
-  }
-  drawCamOverlay();
-  camRAF = requestAnimationFrame(camLoop);
-}
-
-function drawCamOverlay() {
-  const ov = $('camOverlay'), ctx = ov.getContext('2d');
-  ctx.clearRect(0, 0, ov.width, ov.height);
-  const hint = $('camHint');
-  if (!camLastQuad) {
-    hint.textContent = cvReady ? 'Recherche du document…' : 'Chargement…';
-    hint.classList.remove('locked');
-    return;
-  }
-  const far = capTooFar($('camVideo'));
-  hint.textContent = far ? 'Rapproche-toi' : 'Document détecté ✓';
-  hint.classList.toggle('locked', !far);
-  const r = videoDisplayRect();
-  const pts = camLastQuad.map(p => ({
-    x: r.offX + p.x * camDetScale * r.scaleFromVideo,
-    y: r.offY + p.y * camDetScale * r.scaleFromVideo,
-  }));
-  ctx.beginPath();
-  pts.forEach((p, i) => i ? ctx.lineTo(p.x, p.y) : ctx.moveTo(p.x, p.y));
-  ctx.closePath();
-  ctx.fillStyle = 'rgba(247,130,27,.18)';
-  ctx.strokeStyle = '#F7821B'; ctx.lineWidth = 3;
-  ctx.fill(); ctx.stroke();
-  pts.forEach(p => {
-    ctx.beginPath(); ctx.arc(p.x, p.y, 7, 0, Math.PI * 2);
-    ctx.fillStyle = '#F7821B'; ctx.fill();
-    ctx.strokeStyle = '#fff'; ctx.lineWidth = 2; ctx.stroke();
-  });
-}
-
-function stopCamera() {
-  if (camRAF) { cancelAnimationFrame(camRAF); camRAF = null; }
-  if (camStream) { camStream.getTracks().forEach(t => t.stop()); camStream = null; }
-  $('camVideo').srcObject = null;
-}
-
-$('camCancel').addEventListener('click', () => { stopCamera(); show('home'); refreshHome(); });
-
-/* vraie photo du capteur (Safari 18.4+). Sans taille demandée, Safari choisit la PLUS
-   PETITE photo disponible : on réclame donc explicitement la plus grande. */
-async function capTakePhoto(track) {
-  if (!track || !('ImageCapture' in window) || !window.ImageCapture) return null;
-  try {
-    const ic = new ImageCapture(track);
-    const work = (async () => {
-      let opts;
-      try {
-        const pc = await ic.getPhotoCapabilities();
-        if (pc && pc.imageWidth && pc.imageHeight && pc.imageWidth.max && pc.imageHeight.max)
-          opts = { imageWidth: pc.imageWidth.max, imageHeight: pc.imageHeight.max };
-      } catch (_) { /* pas de capacités : on tente sans taille */ }
-      if (!opts) return ic.takePhoto();
-      try { return await ic.takePhoto(opts); } catch (_) { return ic.takePhoto(); }
-    })();
-    const blob = await Promise.race([work,
-      new Promise((_, rej) => setTimeout(() => rej(new Error('takePhoto timeout')), 4000))]);
-    const bmp = await createImageBitmap(blob, { imageOrientation: 'from-image' });
-    const mp = bmp.width * bmp.height / 1e6;
-    const canvas = bitmapToCanvas(bmp, MAX_SIDE);
-    freeBitmap(bmp);
-    return { canvas, mp };
-  } catch (err) { console.warn('takePhoto indisponible, image du flux', err); return null; }
-}
-
-/* netteté : variance du Laplacien dans le cadre (ou au centre si pas de cadre)
-   canvas : image source ; quad : 4 coins en px de ce canvas, ou null */
-function capSharpness(canvas, quad) {
-  if (!cvReady) return 0;
-  // zone mesurée : boîte englobante du cadre, rétrécie de 10 % (on évite la table)
-  let x0 = canvas.width * 0.2, y0 = canvas.height * 0.2, x1 = canvas.width * 0.8, y1 = canvas.height * 0.8;
-  if (quad) {
-    const xs = quad.map(p => p.x), ys = quad.map(p => p.y);
-    const bx0 = Math.min(...xs), bx1 = Math.max(...xs), by0 = Math.min(...ys), by1 = Math.max(...ys);
-    x0 = bx0 + 0.1 * (bx1 - bx0); x1 = bx1 - 0.1 * (bx1 - bx0);
-    y0 = by0 + 0.1 * (by1 - by0); y1 = by1 - 0.1 * (by1 - by0);
-  }
-  x0 = Math.max(0, Math.round(x0)); y0 = Math.max(0, Math.round(y0));
-  const w = Math.min(canvas.width - x0, Math.round(x1 - x0)), h = Math.min(canvas.height - y0, Math.round(y1 - y0));
-  if (w < 16 || h < 16) return 0;
-  // toujours mesurée à la même échelle (640 px de large maxi) pour comparer les images entre elles
-  const k = Math.min(1, 640 / w);
-  const tmp = document.createElement('canvas');
-  tmp.width = Math.max(16, Math.round(w * k)); tmp.height = Math.max(16, Math.round(h * k));
-  tmp.getContext('2d').drawImage(canvas, x0, y0, w, h, 0, 0, tmp.width, tmp.height);
-  const trash = [];
-  const M = (m) => { trash.push(m); return m; };
-  try {
-    const src = M(cv.imread(tmp));
-    const gray = M(new cv.Mat()), lap = M(new cv.Mat()), mean = M(new cv.Mat()), sd = M(new cv.Mat());
-    cv.cvtColor(src, gray, cv.COLOR_RGBA2GRAY);
-    cv.Laplacian(gray, lap, cv.CV_16S, 3);
-    cv.meanStdDev(lap, mean, sd);
-    return sd.data64F[0] * sd.data64F[0];
-  } catch (err) {
-    console.warn('Mesure de netteté échouée', err);
-    return 0;
-  } finally {
-    trash.forEach((t) => { try { t.delete(); } catch (_) {} });
-    releaseCanvas(tmp);
-  }
-}
-
-
-/* secours sans photo : quelques images du flux, on garde la plus nette
-   (2 canvas pleine taille au maximum) */
-async function capSharpest(video, first, liveQuad, detScale) {
-  const quad = liveQuad ? liveQuad.map(p => ({ x: p.x * detScale, y: p.y * detScale })) : null;
-  let best = first, bestS = capSharpness(first, quad), spare = null;
-  for (let i = 0; i < 4; i++) {
-    await new Promise(r => setTimeout(r, 70));
-    if (!camStream || !video.videoWidth) break;
-    const c = spare || document.createElement('canvas');
-    c.width = video.videoWidth; c.height = video.videoHeight;
-    c.getContext('2d').drawImage(video, 0, 0);
-    const s = capSharpness(c, quad);
-    if (s > bestS) { spare = best; best = c; bestS = s; } else spare = c;
-  }
-  if (spare) releaseCanvas(spare);
-  return best;
-}
-
-/* le document occupe trop peu de pixels pour que le petit texte soit net ?
-   (pas de conseil s'il remplit déjà l'image dans sa longueur) */
-function capTooFar(video) {
-  if (!camLastQuad) return false;
-  const q = camLastQuad.map(p => ({ x: p.x * camDetScale, y: p.y * camDetScale }));
-  const a = (dist(q[0], q[1]) + dist(q[3], q[2])) / 2, b = (dist(q[1], q[2]) + dist(q[0], q[3])) / 2;
-  const vs = Math.min(video.videoWidth, video.videoHeight), vl = Math.max(video.videoWidth, video.videoHeight);
-  return Math.min(a, b) < 900 && Math.min(a, b) < 0.55 * vs && Math.max(a, b) < 0.65 * vl;
-}
-
-const mpText = (mp) => mp.toFixed(1).replace('.', ',') + ' MP';
-
-let camShooting = false;
-$('camShoot').addEventListener('click', async () => {
-  const v = $('camVideo');
-  if (!v.videoWidth || camShooting) return;
-  camShooting = true;
-  try {
-    // image du flux (toujours dispo) + cadre live que l'utilisateur a vu
-    let frame = document.createElement('canvas');
-    frame.width = v.videoWidth; frame.height = v.videoHeight;
-    frame.getContext('2d').drawImage(v, 0, 0);
-    const liveQuad = camLastQuad;
-    const detScale = camDetScale;
-    showLoader('Capture…');
-    // vraie photo du capteur ; sinon la plus nette de quelques images du flux
-    const shot = await capTakePhoto(camStream && camStream.getVideoTracks()[0]);
-    const photo = shot && shot.canvas;
-    if (!photo) frame = await capSharpest(v, frame, liveQuad, detScale);
-    stopCamera();
-    await ensureCv();
-    showLoader('Détection des bords…');
-    let base = null, corners = null;
-    // 1) photo capteur (cadrage différent du flux) : détection dessus
-    if (photo) { corners = detectScaled(photo); if (corners) base = photo; }
-    if (!base) {
-      // 2) image figée du flux : détection sur ce qui a VRAIMENT été pris ;
-      //    le cadre live (moyenne des dernières détections) ne sert qu'en secours
-      const fb = bitmapToCanvas(frame, MAX_SIDE);
-      corners = detectScaled(fb);
-      if (!corners && liveQuad) {
-        const s = fb.width / frame.width;
-        corners = liveQuad.map(p => ({ x: p.x * detScale * s, y: p.y * detScale * s }));
-      }
-      const sameFrame = photo && Math.abs(photo.width / photo.height - fb.width / fb.height) < 0.02;
-      if (corners && sameFrame) {
-        // même cadrage : on garde la photo (plus nette) avec les coins trouvés sur le flux
-        const kx = photo.width / fb.width, ky = photo.height / fb.height;
-        corners = corners.map(p => ({ x: p.x * kx, y: p.y * ky }));
-        base = photo;
-        releaseCanvas(fb);
-      } else if (corners) base = fb;
-      else {
-        // 3) rien nulle part : meilleure image dispo + rectangle par défaut
-        base = photo || fb;
-        if (base !== fb) releaseCanvas(fb);
-        corners = fallbackRect(base.width, base.height);
-      }
-    }
-    const info = base === photo ? 'photo ' + mpText(shot.mp) : 'vidéo ' + mpText(frame.width * frame.height / 1e6);
-    if (photo && base !== photo) releaseCanvas(photo);
-    releaseCanvas(frame);
-    hideLoader();
-    openEditor({ base, corners, rotation: 0, filter: 'bw', darkness: 50, pageIndex: null, info });
-  } catch (err) {
-    console.error(err); stopCamera(); hideLoader(); toast('Erreur de capture.');
-    show('home'); refreshHome();
-  } finally {
-    camShooting = false;
-  }
-});
-
-/* app en arrière-plan / écran verrouillé pendant la caméra : iOS coupe le flux
-   (image noire ou figée au retour) -> on ferme proprement et on revient à l'accueil */
-document.addEventListener('visibilitychange', () => {
-  if (document.hidden && camStream && !camShooting) { stopCamera(); show('home'); refreshHome(); }
-});
+$('cameraInput').addEventListener('change', (e) => processImageFile(e.target.files && e.target.files[0], 'photo'));
+$('libraryInput').addEventListener('change', (e) => processImageFile(e.target.files && e.target.files[0], 'photothèque'));
 
 let _relayoutTimer = null;
 window.addEventListener('resize', () => {
-  if (camStream) resizeOverlay();
   // éditeur : l'image change de taille (rotation du téléphone…) -> on recale les poignées
   if (editState && !$('editor').classList.contains('hidden')) {
     clearTimeout(_relayoutTimer);
