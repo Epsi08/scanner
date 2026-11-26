@@ -34,6 +34,17 @@
     overscroll-behavior: none;
   }
   button { font-family: inherit; cursor: pointer; border: none; background: none; color: inherit; }
+  /* retour visuel immédiat au toucher (pas d'attente du relâcher) */
+  button { transition: transform .1s ease-out, opacity .1s ease-out; touch-action: manipulation; }
+  button:active { transform: scale(.96); opacity: .85; }
+  /* action principale d'un écran : en bas, à portée du pouce */
+  .primary-btn {
+    display: flex; align-items: center; justify-content: center; gap: 8px;
+    width: 100%; height: 50px; border-radius: 14px;
+    background: var(--accent); color: #fff; font-size: 17px; font-weight: 600;
+  }
+  .primary-btn svg { width: 22px; height: 22px; }
+  .cta { flex-shrink: 0; padding: 6px 16px calc(var(--safe-bottom) + 10px); }
   .hidden { display: none !important; }
 
   /* ---------- Écran générique ---------- */
@@ -62,7 +73,7 @@
   .topbar .left { left: 12px; }
   .topbar .right { right: 12px; }
   .iconbtn {
-    width: 40px; height: 40px; border-radius: 50%;
+    width: 44px; height: 44px; border-radius: 50%;
     display: flex; align-items: center; justify-content: center;
     color: var(--accent);
   }
@@ -112,12 +123,13 @@
     border-top: 1px solid var(--sep);
     background: var(--bg);
   }
-  .bottombar button {
-    display: flex; flex-direction: column; align-items: center; gap: 3px;
-    font-size: 11px; color: var(--text-2); flex: 1;
+  .bottombar { gap: 12px; }
+  .bottombar #addPagesBtn {
+    display: flex; flex-direction: column; align-items: center; justify-content: center; gap: 3px;
+    font-size: 11px; color: var(--text-2); min-width: 64px; height: 50px;
   }
-  .bottombar button svg { width: 26px; height: 26px; }
-  .bottombar button.primary { color: var(--accent); }
+  .bottombar #addPagesBtn svg { width: 26px; height: 26px; }
+  .bottombar .primary-btn { flex: 1; width: auto; }
 
   /* FAB scanner (état vide) */
   .fab {
@@ -127,6 +139,7 @@
     display: flex; align-items: center; justify-content: center;
     box-shadow: 0 4px 14px rgba(247,130,27,.45);
   }
+  .fab:active { transform: translateX(-50%) scale(.94); }
   .fab svg { width: 32px; height: 32px; }
 
   /* ---------- ÉDITEUR ---------- */
@@ -156,8 +169,9 @@
   /* barre interrupteur aperçu */
   .preview-bar {
     flex-shrink: 0; display: flex; align-items: center; justify-content: space-between;
-    padding: 10px 18px 4px; background: var(--editor-bg); color: #c8c8c8; font-size: 13px;
+    padding: 10px 16px 4px; background: var(--editor-bg); color: #c8c8c8; font-size: 13px; gap: 12px;
   }
+  .preview-bar .lbl { display: flex; align-items: center; gap: 8px; }
   .switch { position: relative; display: inline-block; width: 46px; height: 28px; }
   .switch input { opacity: 0; width: 0; height: 0; }
   .switch .track {
@@ -180,31 +194,24 @@
   .darkness input { flex: 1; accent-color: var(--accent); height: 26px; }
 
   /* filtres */
-  .filters {
-    flex-shrink: 0; display: flex; gap: 10px; overflow-x: auto;
-    padding: 14px 16px 6px; background: var(--editor-bg);
-  }
+  /* N&B / Couleur : contrôle segmenté, sur la même ligne que l'aperçu */
+  .filters { display: flex; background: #3a3a3c; border-radius: 10px; padding: 2px; }
   .chip {
-    flex-shrink: 0; text-align: center; color: #aaa; font-size: 12px;
+    min-width: 92px; height: 34px; border-radius: 8px; padding: 0 12px;
+    color: #c8c8c8; font-size: 14px; font-weight: 500;
   }
-  .chip .swatch {
-    width: 58px; height: 58px; border-radius: 10px; margin-bottom: 5px;
-    border: 2.5px solid transparent; background: #333;
-    display: flex; align-items: center; justify-content: center;
-    font-size: 11px; color: #888; overflow: hidden;
-  }
-  .chip.active { color: var(--accent); font-weight: 600; }
-  .chip.active .swatch { border-color: var(--accent); }
+  .chip.active { background: #636366; color: #fff; font-weight: 600; }
+  .chip:active { transform: none; }
 
   /* outils éditeur */
   .edit-tools {
     flex-shrink: 0; display: flex; justify-content: space-around;
-    padding: 8px 12px calc(var(--safe-bottom) + 12px);
+    padding: 6px 12px 2px;
     background: var(--editor-bg);
   }
   .edit-tools button {
-    display: flex; flex-direction: column; align-items: center; gap: 3px;
-    color: #fff; font-size: 11px;
+    display: flex; flex-direction: column; align-items: center; justify-content: center; gap: 3px;
+    color: #fff; font-size: 11px; min-width: 64px; min-height: 50px;
   }
   .edit-tools button svg { width: 24px; height: 24px; }
   .edit-tools button.danger { color: #FF453A; }
@@ -228,6 +235,8 @@
   .viewer-nav svg { width: 26px; height: 26px; }
   #viewerPrev { left: 8px; } #viewerNext { right: 8px; }
   .viewer-nav.hidden { display: none; }
+  .viewer-nav:active { transform: translateY(-50%) scale(.92); }
+  #viewerBody { touch-action: pan-y; }
 
   /* source et résolution de la photo, sous le titre de l'éditeur */
   .cap-info { display: block; font-size: 11px; font-weight: 400; color: #9a9a9a; text-align: center; }
@@ -247,6 +256,13 @@
     animation: slideup .25s cubic-bezier(.2,.8,.2,1);
   }
   @keyframes slideup { from { transform: translateY(100%) } to { transform: translateY(0) } }
+  /* réglage iPhone « Réduire les animations » : fondus au lieu des glissements */
+  @media (prefers-reduced-motion: reduce) {
+    .sheet { animation: fade .2s ease; }
+    button, button:active { transition: none; transform: none; }
+    .fab, .fab:active { transform: translateX(-50%); }
+    .viewer-nav, .viewer-nav:active { transform: translateY(-50%); }
+  }
   .sheet .grabber { width: 38px; height: 5px; border-radius: 3px; background: #C7C7CC; margin: 6px auto 14px; }
   .sheet h3 { text-align: center; margin: 0 0 4px; font-size: 17px; }
   .sheet .sub { text-align: center; color: var(--text-2); font-size: 13px; margin-bottom: 18px; }
@@ -326,7 +342,7 @@
       <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M12 5v14M5 12h14"/></svg>
       Ajouter
     </button>
-    <button class="primary" id="exportBtn">
+    <button class="primary-btn" id="exportBtn">
       <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M4 12v8a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2v-8"/><path d="M12 2v14"/><path d="m7 7 5-5 5 5"/></svg>
       Exporter
     </button>
@@ -340,9 +356,6 @@
       <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M18 6 6 18M6 6l12 12"/></svg>
     </button>
     <div class="title">Ajuster<span class="cap-info" id="capInfo"></span></div>
-    <button class="iconbtn" id="editDone" style="position:absolute;right:12px;top:calc(var(--safe-top) + 8px);color:var(--accent);font-weight:700;width:auto;border-radius:20px;padding:0 6px;">
-      <span style="font-size:16px;font-weight:600;">OK</span>
-    </button>
   </div>
 
   <div class="canvas-wrap" id="canvasWrap">
@@ -352,10 +365,15 @@
   </div>
 
   <div class="preview-bar">
-    <span>Aperçu du rendu en direct</span>
-    <label class="switch">
-      <input type="checkbox" id="livePreviewToggle">
-      <span class="track"></span>
+    <div class="filters" id="filters">
+      <button class="chip active" data-filter="bw">N&amp;B</button>
+      <button class="chip" data-filter="color">Couleur</button>
+    </div>
+    <label class="lbl">Aperçu
+      <span class="switch">
+        <input type="checkbox" id="livePreviewToggle" aria-label="Aperçu du rendu en direct">
+        <span class="track"></span>
+      </span>
     </label>
   </div>
 
@@ -363,11 +381,6 @@
     <span>Clair</span>
     <input type="range" id="darknessSlider" min="0" max="100" value="50" aria-label="Noirceur">
     <span>Foncé</span>
-  </div>
-
-  <div class="filters" id="filters">
-    <button class="chip active" data-filter="bw"><div class="swatch">N&amp;B</div>Noir &amp; blanc</button>
-    <button class="chip" data-filter="color"><div class="swatch">Coul.</div>Couleur</button>
   </div>
 
   <div class="edit-tools">
@@ -381,11 +394,13 @@
     </button>
     <button id="resetCorners">
       <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M3 7V5a2 2 0 0 1 2-2h2"/><path d="M17 3h2a2 2 0 0 1 2 2v2"/><path d="M21 17v2a2 2 0 0 1-2 2h-2"/><path d="M7 21H5a2 2 0 0 1-2-2v-2"/></svg>
-      Tout
+      Image entière
     </button>
-    <button class="danger" id="deletePage">
-      <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M3 6h18M8 6V4a2 2 0 0 1 2-2h4a2 2 0 0 1 2 2v2M19 6l-1 14a2 2 0 0 1-2 2H8a2 2 0 0 1-2-2L5 6"/></svg>
-      Suppr.
+  </div>
+  <div class="cta">
+    <button class="primary-btn" id="editDone">
+      <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M20 6 9 17l-5-5"/></svg>
+      Valider
     </button>
   </div>
 </section>
@@ -412,13 +427,19 @@
       <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M12 20h9"/><path d="M16.5 3.5a2.12 2.12 0 0 1 3 3L7 19l-4 1 1-4Z"/></svg>
       Modifier
     </button>
-    <button id="viewerExport">
-      <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M4 12v8a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2v-8"/><path d="M12 2v14"/><path d="m7 7 5-5 5 5"/></svg>
-      Exporter
+    <button id="viewerAdd">
+      <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M12 5v14M5 12h14"/></svg>
+      Ajouter
     </button>
     <button class="danger" id="viewerDelete">
       <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M3 6h18M8 6V4a2 2 0 0 1 2-2h4a2 2 0 0 1 2 2v2M19 6l-1 14a2 2 0 0 1-2 2H8a2 2 0 0 1-2-2L5 6"/></svg>
       Suppr.
+    </button>
+  </div>
+  <div class="cta">
+    <button class="primary-btn" id="viewerExport">
+      <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M4 12v8a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2v-8"/><path d="M12 2v14"/><path d="m7 7 5-5 5 5"/></svg>
+      Exporter
     </button>
   </div>
 </section>
@@ -541,6 +562,20 @@ $('viewerPrev').addEventListener('click', () => openPageViewer(viewerIndex - 1))
 $('viewerNext').addEventListener('click', () => openPageViewer(viewerIndex + 1));
 $('viewerEdit').addEventListener('click', () => openEditorForPage(viewerIndex));
 $('viewerExport').addEventListener('click', () => openExportSheet());
+$('viewerAdd').addEventListener('click', () => openSourceSheet());
+/* glisser à gauche / à droite pour changer de page */
+(() => {
+  let x0 = null, y0 = 0;
+  $('viewerBody').addEventListener('pointerdown', (e) => { x0 = e.clientX; y0 = e.clientY; });
+  $('viewerBody').addEventListener('pointerup', (e) => {
+    if (x0 === null) return;
+    const dx = e.clientX - x0, dy = e.clientY - y0;
+    x0 = null;
+    if (Math.abs(dx) < 50 || Math.abs(dx) < 1.5 * Math.abs(dy)) return;
+    openPageViewer(viewerIndex + (dx < 0 ? 1 : -1));
+  });
+  $('viewerBody').addEventListener('pointercancel', () => { x0 = null; });
+})();
 $('viewerDelete').addEventListener('click', () => {
   if (!confirm('Supprimer cette page ?')) return;
   freePage(pages[viewerIndex]);
@@ -1505,12 +1540,21 @@ function reopenEditorImg() {
   renderEditorImage(true);
 }
 
-/* filtres */
+/* aperçu du rendu (mémorisé) */
+function setLivePreview(on) {
+  livePreview = on;
+  $('livePreviewToggle').checked = on;
+  try { localStorage.setItem('scanLivePreview', on ? '1' : '0'); } catch (_) { /* cookies bloqués */ }
+}
+
+/* filtres : un réglage doit toujours se voir -> on allume l'aperçu s'il était éteint */
 document.querySelectorAll('.chip').forEach(ch => {
   ch.addEventListener('click', () => {
+    if (!editState) return;
     editState.filter = ch.dataset.filter;
     updateFilterUI();
-    if (livePreview) renderEditorImage(false);
+    if (!livePreview) setLivePreview(true);
+    renderEditorImage(false);
   });
 });
 
@@ -1518,13 +1562,12 @@ document.querySelectorAll('.chip').forEach(ch => {
 $('darknessSlider').addEventListener('input', (e) => {
   if (!editState) return;
   editState.darkness = +e.target.value;
-  schedulePreview();
+  if (!livePreview) { setLivePreview(true); renderEditorImage(false); }
+  else schedulePreview();
 });
 
-/* interrupteur aperçu live (mémorisé) */
 $('livePreviewToggle').addEventListener('change', (e) => {
-  livePreview = e.target.checked;
-  try { localStorage.setItem('scanLivePreview', livePreview ? '1' : '0'); } catch (_) { /* cookies bloqués */ }
+  setLivePreview(e.target.checked);
   if (editState) renderEditorImage(false);
 });
 
@@ -1535,14 +1578,6 @@ $('editCancel').addEventListener('click', () => {
   closeEditor();
   if (idx !== null && idx < pages.length) openPageViewer(idx);
   else { show('home'); refreshHome(); }
-});
-$('deletePage').addEventListener('click', () => {
-  if (editState.pageIndex !== null) {
-    if (!confirm('Supprimer cette page ?')) return;
-    freePage(pages[editState.pageIndex]);
-    pages.splice(editState.pageIndex, 1);
-  }
-  closeEditor(); show('home'); refreshHome();
 });
 
 /* valider */
